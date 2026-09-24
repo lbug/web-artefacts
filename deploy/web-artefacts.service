@@ -1,0 +1,15 @@
+# systemd user unit. Install:
+#   cp deploy/web-artefacts.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now web-artefacts
+[Unit]
+Description=web-artefacts (local artifact viewer for coding agents)
+After=network.target
+
+[Service]
+ExecStart=/home/lukas/.nvm/versions/node/v24.1.0/bin/node --disable-warning=ExperimentalWarning /home/lukas/projects/web-artefacts/src/cli.ts serve
+WorkingDirectory=/home/lukas/projects/web-artefacts
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
