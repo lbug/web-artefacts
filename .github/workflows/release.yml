@@ -26,7 +26,18 @@ jobs:
       - run: npm install -g npm@latest
       - name: Tag must match package.json version
         run: test "v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
+      - name: Skip if this version is already on npm
+        id: check
+        run: |
+          if npm view "web-artefacts@$(node -p 'require("./package.json").version')" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Version already on npm – nothing to publish."
+          fi
       - run: npm ci
+        if: steps.check.outputs.published != 'true'
       - run: npm run typecheck
+        if: steps.check.outputs.published != 'true'
       - run: npm test
+        if: steps.check.outputs.published != 'true'
       - run: npm publish --access public
+        if: steps.check.outputs.published != 'true'
