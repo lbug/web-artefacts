@@ -51,6 +51,5 @@
     "zod": "^4.6.5",
     "@modelcontextprotocol/server": "^2.1.0",
     "@modelcontextprotocol/client": "^2.1.0"
-  },
-  "private": true
+  }
 }
