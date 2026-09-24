@@ -49,8 +49,9 @@ test("stdio MCP: autostart, publish, revise, comment loop", async (t) => {
   writeFileSync(join(dataDir, "page.html"), "<h1>v1</h1>");
   const publishedResult = await client.callTool({ name: "publish_artifact", arguments: { path: "page.html", title: "Demo" } });
   const publishedText = textOf(publishedResult);
-  const structured = publishedResult.structuredContent as { id: string; version: number; url: string };
+  const structured = publishedResult.structuredContent as { id: string; version: number; url: string; next_step: string };
   assert.equal(structured.version, 1);
+  assert.match(structured.next_step, /Give the user this URL/);
   assert.equal(structured.url, `${base}/a/${structured.id}`);
   const published = parsePublished(publishedText);
   assert.equal(published.version, 1);
@@ -79,7 +80,10 @@ test("stdio MCP: autostart, publish, revise, comment loop", async (t) => {
   const feedback = JSON.parse(feedbackText);
   assert.equal(feedback[0].body, "Make the heading red");
 
-  const v2Text = textOf(await client.callTool({ name: "publish_artifact", arguments: { id: published.id, html: "<h1 style=color:red>v2</h1>" } }));
+  const v2Result = await client.callTool({ name: "publish_artifact", arguments: { id: published.id, html: "<h1 style=color:red>v2</h1>" } });
+  const v2Text = textOf(v2Result);
+  // The note must also reach clients that only show structuredContent.
+  assert.match((v2Result.structuredContent as { note?: string }).note ?? "", /^Note: open user comments/);
   const v2 = parsePublished(v2Text);
   // The comment is still open, so the response points the agent to it.
   assert.match(v2Text, /Note: open user comments – "Demo" \(id \w+\): 1/);

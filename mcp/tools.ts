@@ -80,11 +80,16 @@ interface ArtifactSummary {
 
 const idParam = z.string().describe("Artifact id: the last path segment of the viewer URL …/a/<id>");
 
+// Some clients (e.g. Claude Code) show the model only structuredContent when a
+// tool declares an outputSchema, so every instruction that lives in the text
+// result is repeated here as `next_step` / `note`.
 const PublishedSchema = z.object({
   id: z.string(),
   version: z.number().int(),
   title: z.string(),
   url: z.string(),
+  next_step: z.string(),
+  note: z.string().optional(),
 });
 
 const ListSchema = z.object({
@@ -99,6 +104,7 @@ const ListSchema = z.object({
       url: z.string(),
     }),
   ),
+  note: z.string().optional(),
 });
 
 // Every tool here only touches the local artifact service.
@@ -139,7 +145,9 @@ export function createMcpServer(opts: { fetchApi: Fetch; cwd?: string; fallbackA
         const result = await fn(args, ctx);
         if (hint !== "none") {
           const skip = hint === "except-self" ? (args as { id?: string }).id : undefined;
-          result.content[0].text += await openCommentsHint(skip);
+          const note = await openCommentsHint(skip);
+          result.content[0].text += note;
+          if (note && result.structuredContent) result.structuredContent.note = note.replace(/^\s*---\s*/, "");
         }
         return result;
       } catch (e) {
@@ -175,14 +183,9 @@ export function createMcpServer(opts: { fetchApi: Fetch; cwd?: string; fallbackA
         id ? `/api/artifacts/${encodeURIComponent(id)}/versions` : "/api/artifacts",
         { method: "POST", body: JSON.stringify({ html: content, title, agent: agentName(ctx) }) },
       );
-      const published = { id: res.id, version: res.version, title: res.title, url: res.url };
-      return text(
-        `Published: "${res.title}" v${res.version}\n` +
-          `URL: ${res.url}\n` +
-          `id: ${res.id}\n\n` +
-          `Give the user this URL in your reply (also for new versions). For revisions call publish_artifact with id "${res.id}".`,
-        published,
-      );
+      const next_step = `Give the user this URL in your reply (also for new versions). For revisions call publish_artifact with id "${res.id}".`;
+      const published = { id: res.id, version: res.version, title: res.title, url: res.url, next_step };
+      return text(`Published: "${res.title}" v${res.version}\nURL: ${res.url}\nid: ${res.id}\n\n${next_step}`, published);
     }),
   );
 
