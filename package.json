@@ -1,6 +1,6 @@
 {
   "name": "web-artefacts",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Local artifact viewer for coding agents: publish HTML via MCP, view and comment in a sandboxed browser viewer",
   "keywords": [
     "mcp",
