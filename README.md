@@ -87,7 +87,7 @@ npm run build          # bundles everything into dist/cli.js (also runs before n
 To point an agent at the source during development (Node ≥ 22.18):
 `node --disable-warning=ExperimentalWarning <repo>/src/cli.ts mcp`
 
-Release: `npm version patch|minor|major`, then `git push --follow-tags`. `.github/workflows/release.yml` publishes via npm trusted publishing. The very first version is published once by hand with `npm publish --access public`.
+Release: `npm version patch|minor|major`, then `git push --follow-tags`. `.github/workflows/release.yml` stages the version via npm trusted publishing; approve it with 2FA on npmjs.com or with `npm stage approve <id>` to make it public. The very first version is published once by hand with `npm publish --access public`.
 
 `src/store.ts` depends on two small interfaces only (`Sql`, `Blobs`), so running on Cloudflare (D1 and R2) would need just two more adapters.
 
