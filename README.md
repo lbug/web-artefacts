@@ -45,7 +45,7 @@ MCP tools cannot notify the agent on their own. Every tool result therefore ends
 
 | Tool | Purpose |
 |---|---|
-| `publish_artifact(path \| html, title, id?)` | Without `id` a new artifact, with `id` a new version of the same URL |
+| `publish_artifact(path \| html, title, id?)` | Without `id` a new artifact, with `id` a new version of the same URL. Identical HTML and title return the existing version instead of creating a new one |
 | `list_artifacts()` | All artifacts, including open comment counts |
 | `read_artifact(id, version?)` | HTML source of a version |
 | `read_comments(id, include_resolved?)` | Comments (default: open ones only) |
@@ -87,7 +87,13 @@ npm run build          # bundles everything into dist/cli.js (also runs before n
 To point an agent at the source during development (Node ≥ 22.18):
 `node --disable-warning=ExperimentalWarning <repo>/src/cli.ts mcp`
 
-Release: `npm version patch|minor|major`, then `git push --follow-tags`. `.github/workflows/release.yml` stages the version via npm trusted publishing; approve it with 2FA on npmjs.com or with `npm stage approve <id>` to make it public. The very first version is published once by hand with `npm publish --access public`.
+Release:
+
+1. `npm version patch|minor|major`, then `git push --follow-tags`.
+2. `.github/workflows/release.yml` tests, builds and stages the version via npm trusted publishing. The trusted publisher may only stage, so nothing goes live without you.
+3. Approve it with 2FA on the package page on npmjs.com. Alternatively run `npm stage approve <id>` (needs npm ≥ 11.15.0 and `npm login`); the id is in the workflow log (`staged with id …`).
+
+The very first version is published once by hand with `npm publish --access public`.
 
 `src/store.ts` depends on two small interfaces only (`Sql`, `Blobs`), so running on Cloudflare (D1 and R2) would need just two more adapters.
 
