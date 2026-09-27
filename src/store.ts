@@ -99,6 +99,15 @@ export class Store {
       );
     }
 
+    const sha256 = await sha256Hex(input.html);
+    const latest = await this.sql.first<{ version: number; title: string; sha256: string }>(
+      "SELECT version, title, sha256 FROM versions WHERE artifact_id = ? ORDER BY version DESC LIMIT 1",
+      id,
+    );
+    if (latest && latest.sha256 === sha256 && (!title || title === latest.title)) {
+      return { id, version: latest.version, title: latest.title, unchanged: true };
+    }
+
     // A single UPDATE ... RETURNING is atomic in SQLite and D1, so two agents
     // publishing at once can never receive the same version number.
     const reserved = await this.sql.first<{ version: number; title: string }>(
@@ -112,9 +121,9 @@ export class Store {
     await this.blobs.put(blobKey(id, reserved.version), input.html);
     await this.sql.run(
       "INSERT INTO versions (artifact_id, version, title, agent, size, sha256, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      id, reserved.version, reserved.title, input.agent ?? null, size, await sha256Hex(input.html), now,
+      id, reserved.version, reserved.title, input.agent ?? null, size, sha256, now,
     );
-    return { id, version: reserved.version, title: reserved.title };
+    return { id, version: reserved.version, title: reserved.title, unchanged: false };
   }
 
   list(limit = 100): Promise<ArtifactRow[]> {

@@ -62,9 +62,25 @@ test("title update with new version", async () => {
   assert.equal((await (await call(`/api/artifacts/${a.id}`)).json()).title, "Neu");
 });
 
+test("republishing identical html keeps the latest version", async () => {
+  const { call, bus } = setup();
+  const a = await (await call("/api/artifacts", { method: "POST", json: { html: "<p>same</p>", title: "T" } })).json();
+  const events: unknown[] = [];
+  bus.on(a.id, (e) => events.push(e));
+
+  const res = await call(`/api/artifacts/${a.id}/versions`, { method: "POST", json: { html: "<p>same</p>" } });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).version, 1);
+  assert.deepEqual(events, []);
+
+  // A new title is a real change.
+  const renamed = await (await call(`/api/artifacts/${a.id}/versions`, { method: "POST", json: { html: "<p>same</p>", title: "T2" } })).json();
+  assert.equal(renamed.version, 2);
+});
+
 test("concurrent publishes get distinct version numbers", async () => {
   const { call } = setup();
-  const a = await (await call("/api/artifacts", { method: "POST", json: { html: "0", title: "T" } })).json();
+  const a = await (await call("/api/artifacts", { method: "POST", json: { html: "start", title: "T" } })).json();
   const results = await Promise.all(
     Array.from({ length: 10 }, (_, i) => call(`/api/artifacts/${a.id}/versions`, { method: "POST", json: { html: String(i) } }).then((r) => r.json())),
   );

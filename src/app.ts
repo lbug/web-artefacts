@@ -183,6 +183,7 @@ export function createViewerApp(cfg: Config, store: Store, bus: Bus) {
     const id = paramId(c);
     const body = await jsonBody(c);
     const res = await store.publish({ id, html: requireHtml(body), title: optString(body.title), agent: optString(body.agent, 80) });
+    if (res.unchanged) return c.json(withUrls(res), 200);
     bus.emit(id, { type: "version", version: res.version });
     return c.json(withUrls(res), 201);
   });

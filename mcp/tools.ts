@@ -178,14 +178,17 @@ export function createMcpServer(opts: { fetchApi: Fetch; cwd?: string; fallbackA
         if (!isAbsolute(path) && !opts.cwd) return fail("path must be absolute.");
         content = await readFile(isAbsolute(path) ? path : resolve(opts.cwd!, path), "utf8");
       }
-      const res = await api<z.infer<typeof PublishedSchema>>(
+      const res = await api<z.infer<typeof PublishedSchema> & { unchanged?: boolean }>(
         fetchApi,
         id ? `/api/artifacts/${encodeURIComponent(id)}/versions` : "/api/artifacts",
         { method: "POST", body: JSON.stringify({ html: content, title, agent: agentName(ctx) }) },
       );
-      const next_step = `Give the user this URL in your reply (also for new versions). For revisions call publish_artifact with id "${res.id}".`;
+      const next_step = res.unchanged
+        ? `Unchanged: the HTML and title are identical to v${res.version}, so no new version was created. Change the content before publishing again with id "${res.id}".`
+        : `Give the user this URL in your reply (also for new versions). For revisions call publish_artifact with id "${res.id}".`;
       const published = { id: res.id, version: res.version, title: res.title, url: res.url, next_step };
-      return text(`Published: "${res.title}" v${res.version}\nURL: ${res.url}\nid: ${res.id}\n\n${next_step}`, published);
+      const heading = res.unchanged ? "Unchanged" : "Published";
+      return text(`${heading}: "${res.title}" v${res.version}\nURL: ${res.url}\nid: ${res.id}\n\n${next_step}`, published);
     }),
   );
 

@@ -90,6 +90,10 @@ test("stdio MCP: autostart, publish, revise, comment loop", async (t) => {
   assert.equal(v2.version, 2);
   assert.equal(v2.id, published.id);
 
+  const sameResult = await client.callTool({ name: "publish_artifact", arguments: { id: published.id, html: "<h1 style=color:red>v2</h1>" } });
+  assert.match(textOf(sameResult), /^Unchanged: "Demo" v2$/m);
+  assert.match((sameResult.structuredContent as { next_step: string }).next_step, /no new version was created/);
+
   await client.callTool({ name: "resolve_comments", arguments: { id: published.id, comment_ids: [feedback[0].id], note: "Made it red in v2" } });
   assert.equal(textOf(await client.callTool({ name: "read_comments", arguments: { id: published.id } })), "No open comments.");
   const all = JSON.parse(textOf(await client.callTool({ name: "read_comments", arguments: { id: published.id, include_resolved: true } })));
