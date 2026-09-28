@@ -19,7 +19,7 @@ A) Show (default): the user wants something explained, visualized or summarized.
 B) Feedback loop: you present alternatives or a draft for a decision, or the user explicitly wants to iterate in the viewer. → publish_artifact, give the URL, say that you are waiting for comments in the viewer (replying in the chat works too), then wait_for_comments. Apply the comments, republish with the same id, call resolve_comments with a short note, wait again – until the user is satisfied or continues in the chat.
 If the user explicitly says otherwise ("just show it", "wait for my feedback"), follow that.
 
-Letting the user answer with a click: when you ask for a choice or a value (pick a draft, tune a color), give the page buttons or inputs that call parent.postMessage({ type: "web-artefacts:comment", text: "Chose draft B" }, "*"). This fills the comment box in the viewer; the user reviews and sends it, and wait_for_comments returns it like any comment. Make the text self-explanatory, since it is all you receive.
+Letting the user answer with clicks: when you ask for choices or values (pick a draft, tune a color), give the page buttons or inputs that call parent.postMessage({ type: "web-artefacts:choice", key: "draft", text: "Draft B" }, "*"). Choices collect next to the comment box in the viewer and go out together with the user's next comment, as "- <text>" lines. Give each question its own key: a new choice with the same key replaces the earlier answer, so the user can change their mind and still answer several questions in one message. Make each text self-explanatory, since it is all you receive.
 
 Rules:
 - After EVERY publish – including new versions – state the URL and the version number in your reply.

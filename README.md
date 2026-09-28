@@ -37,11 +37,11 @@ Just talk to your agent, e.g. "explain this as a diagram" or "show me three draf
 
 What you say explicitly wins, e.g. "just show it" or "wait for my feedback". The agent talks to you in your language.
 
-In the feedback loop, the comment panel shows whether the agent is currently waiting for your feedback. Comments you write in a row reach it together: it waits until you pause for 5 seconds. For choices, the agent can put buttons or inputs into the page; clicking one fills the comment box, and you send it.
+In the feedback loop, the comment panel shows whether the agent is currently waiting for your feedback. Comments you write in a row reach it together: it waits until you pause for 5 seconds. For decisions, the agent can put buttons or inputs into the page: your choices collect next to the comment box, and you send them together with your comment.
 
 **Picking up an artifact in another session:** click "⧉ Copy for agent" in the viewer and paste the reference into the session. The id is also the last path segment of every viewer URL (`/a/<id>`).
 
-**Suggesting a comment from the page:** artifact code can call `parent.postMessage({ type: "web-artefacts:comment", text: "…" }, "*")`. The viewer only fills the comment box with the text; nothing is sent without the user.
+**Choices from the page:** artifact code can call `parent.postMessage({ type: "web-artefacts:choice", key: "draft", text: "Draft B" }, "*")`. The viewer shows each choice as a removable chip next to the comment box and sends all of them with the user's next comment; nothing is sent without the user. A choice with the same `key` replaces the previous one, choices without a key add up.
 
 MCP tools cannot notify the agent on their own. Every tool result therefore ends with a note when any artifact has open comments.
 

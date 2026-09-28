@@ -182,13 +182,14 @@ async function renderViewer(id) {
   const nameInput = h("input", { value: store.get("author", "User"), "aria-label": "Your name", onchange: () => store.set("author", nameInput.value.trim() || "User") });
   const forVersion = h("span");
   const agentStatus = h("div", { class: "agent-status" });
+  const choicesEl = h("div", { class: "choices", "aria-label": "Choices from the page", hidden: true });
   const sendBtn = h("button", { class: "btn primary", onclick: send }, "Send");
   textarea.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); } });
 
   const panel = h("aside", { class: "panel" },
     h("header", {}, h("h2", {}, "Comments"), h("label", { class: "toggle" }, resolvedToggle, "Show resolved")),
     commentsList,
-    h("div", { class: "composer" }, agentStatus, textarea, h("div", { class: "row" }, "As", nameInput, forVersion, sendBtn)));
+    h("div", { class: "composer" }, agentStatus, choicesEl, textarea, h("div", { class: "row" }, "As", nameInput, forVersion, sendBtn)));
 
   const body = h("div", { class: "body" }, stage, panel);
   root.replaceChildren(h("div", { class: "viewer" },
@@ -213,11 +214,15 @@ async function renderViewer(id) {
 
   async function send() {
     const text = textarea.value.trim();
-    if (!text) return;
+    if (!text && choices.size === 0) return;
+    // Choices and free text go out together, as one comment.
+    const body = [[...choices.values()].map((c) => `- ${c}`).join("\n"), text].filter(Boolean).join("\n\n");
     sendBtn.disabled = true;
     try {
-      await api(`/api/artifacts/${id}/comments`, { method: "POST", body: JSON.stringify({ body: text, version: current(), author: nameInput.value.trim() || "User" }) });
+      await api(`/api/artifacts/${id}/comments`, { method: "POST", body: JSON.stringify({ body, version: current(), author: nameInput.value.trim() || "User" }) });
       textarea.value = "";
+      choices.clear();
+      renderChoices();
       await loadMeta();
     } catch (e) {
       toast(`Sending failed: ${e.message}`);
@@ -270,27 +275,32 @@ async function renderViewer(id) {
   };
   showListening(false);
 
-  // An artifact can suggest a comment, e.g. from a "Choose this draft" button:
-  // parent.postMessage({ type: "web-artefacts:comment", text: "…" }, "*").
-  // It only fills the composer; sending stays the user's decision.
-  let lastSuggestion = null;
+  // An artifact can report choices, e.g. from a "Choose this draft" button:
+  // parent.postMessage({ type: "web-artefacts:choice", key: "draft", text: "Draft B" }, "*").
+  // They collect as chips next to the composer and go out with the next
+  // comment, so sending stays the user's decision. A choice with the same key
+  // replaces the earlier answer to that question; without a key, choices add up.
+  const choices = new Map(); // key -> text, in the order they were first made
+  function renderChoices() {
+    choicesEl.hidden = choices.size === 0;
+    choicesEl.replaceChildren(...[...choices].map(([key, text]) => h("span", { class: "chip" }, text,
+      h("button", { title: "Remove", "aria-label": `Remove "${text}"`, onclick: () => { choices.delete(key); renderChoices(); } }, "×"))));
+  }
   window.addEventListener("message", (e) => {
     const frame = stage.querySelector("iframe");
     if (!frame || e.source !== frame.contentWindow) return;
-    const { type, text } = e.data ?? {};
-    if (type !== "web-artefacts:comment" || typeof text !== "string" || !text.trim()) return;
-    const suggestion = text.trim().slice(0, 20_000);
-    // A new suggestion replaces the previous one as long as the user has not edited it.
-    const draft = textarea.value.trim();
-    textarea.value = !draft || draft === lastSuggestion ? suggestion : `${draft}\n${suggestion}`;
-    lastSuggestion = suggestion;
+    const { type, key, text } = e.data ?? {};
+    if (type !== "web-artefacts:choice" || typeof text !== "string" || !text.trim()) return;
+    const choice = text.trim().slice(0, 2000);
+    const mapKey = typeof key === "string" && key ? `key:${key}` : `text:${choice}`;
+    if (!choices.has(mapKey) && choices.size >= 50) return;
+    choices.set(mapKey, choice);
+    renderChoices();
     if (!state.panelOpen) {
       state.panelOpen = true;
       store.set("panelOpen", "1");
       update();
     }
-    textarea.focus();
-    toast("Suggested by the page – review it and press Send");
   });
 
   let frameSrc = null;
