@@ -13,6 +13,7 @@ import { isValidId, NotFound, type Store } from "./store.ts";
 
 export const MAX_HTML_BYTES = 10 * 1024 * 1024;
 const MAX_WAIT_SECONDS = 600;
+const MAX_SETTLE_SECONDS = 30;
 
 // Where artifact HTML may load scripts, styles and fonts from. Everything else
 // (including arbitrary fetch targets) is blocked, so artifact code cannot send
@@ -36,7 +37,11 @@ export const RAW_CSP = [
 
 // --- Change notifications (SSE for viewers, long-poll for agents) ----------
 
-export type ChangeEvent = { type: "version"; version: number } | { type: "comment"; commentId: number } | { type: "resolved" };
+export type ChangeEvent =
+  | { type: "version"; version: number }
+  | { type: "comment"; commentId: number }
+  | { type: "resolved" }
+  | { type: "listening"; listening: boolean };
 type Listener = (e: ChangeEvent) => void;
 
 export class Bus {
@@ -52,6 +57,25 @@ export class Bus {
   }
   emit(id: string, e: ChangeEvent) {
     for (const fn of this.listeners.get(id) ?? []) fn(e);
+  }
+
+  // How many agents currently long-poll for comments, per artifact. Viewers
+  // show it, so the user knows whether a comment is read right away.
+  private waiting = new Map<string, number>();
+  /** Marks an agent as waiting for comments on `id` until the returned function is called. */
+  listen(id: string): () => void {
+    const n = this.waiting.get(id) ?? 0;
+    this.waiting.set(id, n + 1);
+    if (n === 0) this.emit(id, { type: "listening", listening: true });
+    return () => {
+      const left = this.waiting.get(id)! - 1;
+      if (left > 0) return void this.waiting.set(id, left);
+      this.waiting.delete(id);
+      this.emit(id, { type: "listening", listening: false });
+    };
+  }
+  isListening(id: string): boolean {
+    return this.waiting.has(id);
   }
 }
 
@@ -211,31 +235,51 @@ export function createViewerApp(cfg: Config, store: Store, bus: Bus) {
 
   // Comments. `after` returns only newer comments; `wait` (seconds) long-polls
   // until at least one arrives, which lets an agent block on user feedback.
+  // `settle` (seconds) then keeps waiting until no new comment arrived for that
+  // long (at most 30 s), because users often write several comments in a row.
   app.get("/api/artifacts/:id/comments", async (c) => {
     const id = paramId(c);
     await store.get(id);
     const includeResolved = c.req.query("include_resolved") === "true";
     const after = Number(c.req.query("after") ?? 0) || 0;
-    const wait = Math.min(Math.max(Number(c.req.query("wait") ?? 0) || 0, 0), MAX_WAIT_SECONDS);
+    const seconds = (name: string, max: number) => Math.min(Math.max(Number(c.req.query(name) ?? 0) || 0, 0), max);
+    const wait = seconds("wait", MAX_WAIT_SECONDS);
+    const settle = seconds("settle", MAX_SETTLE_SECONDS);
+    const signal = c.req.raw.signal;
 
-    const fetchNew = async () => (await store.comments(id, includeResolved)).filter((cm) => cm.id > after);
-    let comments = await fetchNew();
-    const deadline = Date.now() + wait * 1000;
-    while (comments.length === 0 && Date.now() < deadline && !c.req.raw.signal.aborted) {
-      await new Promise<void>((resolve) => {
-        const done = () => {
+    // Resolves true when a comment arrives within `ms`, false on timeout or abort.
+    const nextComment = (ms: number) =>
+      new Promise<boolean>((resolve) => {
+        const done = (arrived: boolean) => {
           off();
           clearTimeout(timer);
-          c.req.raw.signal.removeEventListener("abort", done);
-          resolve();
+          signal.removeEventListener("abort", aborted);
+          resolve(arrived);
         };
-        const off = bus.on(id, (e) => e.type === "comment" && done());
-        const timer = setTimeout(done, deadline - Date.now());
-        c.req.raw.signal.addEventListener("abort", done);
+        const aborted = () => done(false);
+        const off = bus.on(id, (e) => e.type === "comment" && done(true));
+        const timer = setTimeout(() => done(false), ms);
+        signal.addEventListener("abort", aborted);
       });
-      comments = await fetchNew();
+
+    const fetchNew = async () => (await store.comments(id, includeResolved)).filter((cm) => cm.id > after);
+    const stopListening = wait > 0 ? bus.listen(id) : () => {};
+    try {
+      let comments = await fetchNew();
+      const deadline = Date.now() + wait * 1000;
+      while (comments.length === 0 && Date.now() < deadline && !signal.aborted) {
+        await nextComment(deadline - Date.now());
+        comments = await fetchNew();
+      }
+      if (comments.length > 0 && wait > 0 && settle > 0) {
+        const settleDeadline = Date.now() + MAX_SETTLE_SECONDS * 1000;
+        while (Date.now() < settleDeadline && (await nextComment(Math.min(settle * 1000, settleDeadline - Date.now()))));
+        comments = await fetchNew();
+      }
+      return c.json({ comments, timed_out: comments.length === 0 && wait > 0 });
+    } finally {
+      stopListening();
     }
-    return c.json({ comments, timed_out: comments.length === 0 && wait > 0 });
   });
 
   app.post("/api/artifacts/:id/comments", async (c) => {
@@ -282,7 +326,7 @@ export function createViewerApp(cfg: Config, store: Store, bus: Bus) {
         off();
         wake?.();
       });
-      await stream.writeSSE({ event: "hello", data: "{}" });
+      await stream.writeSSE({ event: "hello", data: JSON.stringify({ listening: bus.isListening(id) }) });
       while (!stream.aborted) {
         const e = queue.shift();
         if (e) {

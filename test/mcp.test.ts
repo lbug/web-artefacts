@@ -74,11 +74,18 @@ test("stdio MCP: autostart, publish, revise, comment loop", async (t) => {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ body: "Make the heading red", author: "Lukas" }),
   });
+  // A second comment shortly after arrives in the same result.
+  await new Promise((r) => setTimeout(r, 300));
+  await fetch(`${base}/api/artifacts/${published.id}/comments`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ body: "And a bit larger", author: "Lukas" }),
+  });
   const feedbackText = textOf(await waiting);
   // wait_for_comments does not repeat its own artifact in the hint.
   assert.doesNotMatch(feedbackText, /open user comments/);
   const feedback = JSON.parse(feedbackText);
-  assert.equal(feedback[0].body, "Make the heading red");
+  assert.deepEqual(feedback.map((c: { body: string }) => c.body), ["Make the heading red", "And a bit larger"]);
 
   const v2Result = await client.callTool({ name: "publish_artifact", arguments: { id: published.id, html: "<h1 style=color:red>v2</h1>" } });
   const v2Text = textOf(v2Result);
@@ -86,7 +93,7 @@ test("stdio MCP: autostart, publish, revise, comment loop", async (t) => {
   assert.match((v2Result.structuredContent as { note?: string }).note ?? "", /^Note: open user comments/);
   const v2 = parsePublished(v2Text);
   // The comment is still open, so the response points the agent to it.
-  assert.match(v2Text, /Note: open user comments – "Demo" \(id \w+\): 1/);
+  assert.match(v2Text, /Note: open user comments – "Demo" \(id \w+\): 2/);
   assert.equal(v2.version, 2);
   assert.equal(v2.id, published.id);
 
@@ -94,11 +101,11 @@ test("stdio MCP: autostart, publish, revise, comment loop", async (t) => {
   assert.match(textOf(sameResult), /^Unchanged: "Demo" v2$/m);
   assert.match((sameResult.structuredContent as { next_step: string }).next_step, /no new version was created/);
 
-  await client.callTool({ name: "resolve_comments", arguments: { id: published.id, comment_ids: [feedback[0].id], note: "Made it red in v2" } });
+  await client.callTool({ name: "resolve_comments", arguments: { id: published.id, comment_ids: feedback.map((c: { id: number }) => c.id), note: "Made it red in v2" } });
   assert.equal(textOf(await client.callTool({ name: "read_comments", arguments: { id: published.id } })), "No open comments.");
   const all = JSON.parse(textOf(await client.callTool({ name: "read_comments", arguments: { id: published.id, include_resolved: true } })));
-  assert.equal(all.length, 2);
-  assert.equal(all[1].body, "Made it red in v2");
+  assert.equal(all.length, 3);
+  assert.equal(all[2].body, "Made it red in v2");
 
   const read = textOf(await client.callTool({ name: "read_artifact", arguments: { id: published.id, version: 1 } }));
   assert.doesNotMatch(read, /open user comments/);

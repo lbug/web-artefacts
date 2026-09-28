@@ -175,6 +175,36 @@ test("long-poll returns as soon as a user comment arrives, ignores agent notes",
   assert.deepEqual(res.comments.map((c: { body: string }) => c.body), ["Farbe dunkler"]);
 });
 
+test("long-poll with settle waits for the user to pause and returns all comments", async () => {
+  const { call } = setup();
+  const a = await (await call("/api/artifacts", { method: "POST", json: { html: "x", title: "T" } })).json();
+  const started = Date.now();
+  const waiting = call(`/api/artifacts/${a.id}/comments?after=0&wait=5&settle=1`).then((r) => r.json());
+  await new Promise((r) => setTimeout(r, 100));
+  await call(`/api/artifacts/${a.id}/comments`, { method: "POST", json: { body: "eins" } });
+  await new Promise((r) => setTimeout(r, 500));
+  await call(`/api/artifacts/${a.id}/comments`, { method: "POST", json: { body: "zwei" } });
+  const res = await waiting;
+  const elapsed = Date.now() - started;
+  assert.deepEqual(res.comments.map((c: { body: string }) => c.body), ["eins", "zwei"]);
+  // Returns one quiet second after the last comment, not at the 5 s deadline.
+  assert.ok(elapsed >= 1500 && elapsed < 3000, `elapsed ${elapsed} ms`);
+});
+
+test("long-poll marks the agent as listening while it waits", async () => {
+  const { call, bus } = setup();
+  const a = await (await call("/api/artifacts", { method: "POST", json: { html: "x", title: "T" } })).json();
+  const events: unknown[] = [];
+  bus.on(a.id, (e) => e.type === "listening" && events.push(e));
+  const waiting = call(`/api/artifacts/${a.id}/comments?after=0&wait=1`);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(bus.isListening(a.id), true);
+  assert.deepEqual(events, [{ type: "listening", listening: true }]);
+  await waiting;
+  assert.equal(bus.isListening(a.id), false);
+  assert.deepEqual(events, [{ type: "listening", listening: true }, { type: "listening", listening: false }]);
+});
+
 test("long-poll times out", async () => {
   const { call } = setup();
   const a = await (await call("/api/artifacts", { method: "POST", json: { html: "x", title: "T" } })).json();
@@ -196,6 +226,7 @@ test("SSE announces new versions", async () => {
     while (!buf.includes(needle)) buf += decoder.decode((await reader.read()).value);
   };
   await readUntil("event: hello");
+  assert.match(buf, /data: \{"listening":false\}/);
   await call(`/api/artifacts/${a.id}/versions`, { method: "POST", json: { html: "y" } });
   await readUntil("event: version");
   assert.match(buf, /"version":2/);

@@ -139,6 +139,10 @@ select.btn { padding-right: 8px; }
 .comments .none { color: var(--muted); text-align: center; padding: 24px 8px; font-size: 13px; }
 
 .composer { border-top: 1px solid var(--border); padding: 10px 14px 14px; display: grid; gap: 8px; }
+.agent-status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.agent-status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
+.agent-status.on { color: var(--text); font-weight: 600; }
+.agent-status.on::before { background: #2fb45a; box-shadow: 0 0 0 3px rgb(47 180 90 / 0.2); }
 .composer textarea { width: 100%; min-height: 76px; max-height: 40vh; resize: vertical; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
 .composer textarea:focus, .composer input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .composer .row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }

@@ -19,12 +19,17 @@ A) Show (default): the user wants something explained, visualized or summarized.
 B) Feedback loop: you present alternatives or a draft for a decision, or the user explicitly wants to iterate in the viewer. → publish_artifact, give the URL, say that you are waiting for comments in the viewer (replying in the chat works too), then wait_for_comments. Apply the comments, republish with the same id, call resolve_comments with a short note, wait again – until the user is satisfied or continues in the chat.
 If the user explicitly says otherwise ("just show it", "wait for my feedback"), follow that.
 
+Letting the user answer with a click: when you ask for a choice or a value (pick a draft, tune a color), give the page buttons or inputs that call parent.postMessage({ type: "web-artefacts:comment", text: "Chose draft B" }, "*"). This fills the comment box in the viewer; the user reviews and sends it, and wait_for_comments returns it like any comment. Make the text self-explanatory, since it is all you receive.
+
 Rules:
 - After EVERY publish – including new versions – state the URL and the version number in your reply.
 - Always publish revisions with the same id: the URL stays the same and open viewers reload live.
 - When the user refers to an artifact (URL, title or a reference copied from the viewer): the id is the last path segment of the URL (…/a/<id>); otherwise find it by title with list_artifacts. Then read_comments first.
 - Tool results may end with a note about open comments. Address it before you continue working on that artifact.
 - Talk to the user in their language; the viewer is language-neutral.`;
+
+/** wait_for_comments returns once the user has not written a new comment for this long. */
+const SETTLE_SECONDS = 5;
 
 /** read_artifact returns at most this much source, to protect the agent's context. */
 const MAX_READ_CHARS = 200_000;
@@ -265,7 +270,7 @@ export function createMcpServer(opts: { fetchApi: Fetch; cwd?: string; fallbackA
     {
       title: "Wait for feedback",
       description:
-        "Waits until the user writes a new comment in the viewer and returns it. Only use it in the feedback loop, after you published a version and asked the user for feedback. On timeout, call it again or ask the user.",
+        "Waits until the user writes new comments in the viewer and returns them; after the first comment it waits until the user pauses for a few seconds, so comments written in a row arrive together. Only use it in the feedback loop, after you published a version and asked the user for feedback. On timeout, call it again or ask the user.",
       inputSchema: z.object({
         id: idParam,
         after_comment_id: z.number().int().optional().describe("Only comments with a greater id. Default: only comments written from now on"),
@@ -292,7 +297,7 @@ export function createMcpServer(opts: { fetchApi: Fetch; cwd?: string; fallbackA
       let comments: Comment[] = [];
       while (comments.length === 0 && Date.now() < deadline && !signal.aborted) {
         const chunk = Math.max(1, Math.min(30, Math.round((deadline - Date.now()) / 1000)));
-        ({ comments } = await api<{ comments: Comment[] }>(fetchApi, `${base}?after=${after}&wait=${chunk}`, { signal }));
+        ({ comments } = await api<{ comments: Comment[] }>(fetchApi, `${base}?after=${after}&wait=${chunk}&settle=${SETTLE_SECONDS}`, { signal }));
         if (comments.length === 0 && progressToken !== undefined) {
           const elapsed = Math.round((Date.now() - started) / 1000);
           await ctx.mcpReq

@@ -181,13 +181,14 @@ async function renderViewer(id) {
   const textarea = h("textarea", { placeholder: `Feedback for the agent … (${/Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl"}+Enter sends)`, "aria-label": "Comment" });
   const nameInput = h("input", { value: store.get("author", "User"), "aria-label": "Your name", onchange: () => store.set("author", nameInput.value.trim() || "User") });
   const forVersion = h("span");
+  const agentStatus = h("div", { class: "agent-status" });
   const sendBtn = h("button", { class: "btn primary", onclick: send }, "Send");
   textarea.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); } });
 
   const panel = h("aside", { class: "panel" },
     h("header", {}, h("h2", {}, "Comments"), h("label", { class: "toggle" }, resolvedToggle, "Show resolved")),
     commentsList,
-    h("div", { class: "composer" }, textarea, h("div", { class: "row" }, "As", nameInput, forVersion, sendBtn)));
+    h("div", { class: "composer" }, agentStatus, textarea, h("div", { class: "row" }, "As", nameInput, forVersion, sendBtn)));
 
   const body = h("div", { class: "body" }, stage, panel);
   root.replaceChildren(h("div", { class: "viewer" },
@@ -251,6 +252,46 @@ async function renderViewer(id) {
       h("div", { class: "text" }, c.body))));
     if (atBottom) commentsList.scrollTop = commentsList.scrollHeight;
   }
+
+  // Whether an agent currently waits for comments (wait_for_comments).
+  let listeningOff;
+  function showListening(on) {
+    clearTimeout(listeningOff);
+    agentStatus.classList.toggle("on", on);
+    agentStatus.textContent = on
+      ? "Agent is waiting for your feedback"
+      : "Agent isn't waiting right now – it sees new comments on its next step";
+  }
+  // Agents long-poll in chunks; ignore the short gaps between two requests.
+  const setListening = (on) => {
+    clearTimeout(listeningOff);
+    if (on) showListening(true);
+    else listeningOff = setTimeout(() => showListening(false), 2000);
+  };
+  showListening(false);
+
+  // An artifact can suggest a comment, e.g. from a "Choose this draft" button:
+  // parent.postMessage({ type: "web-artefacts:comment", text: "…" }, "*").
+  // It only fills the composer; sending stays the user's decision.
+  let lastSuggestion = null;
+  window.addEventListener("message", (e) => {
+    const frame = stage.querySelector("iframe");
+    if (!frame || e.source !== frame.contentWindow) return;
+    const { type, text } = e.data ?? {};
+    if (type !== "web-artefacts:comment" || typeof text !== "string" || !text.trim()) return;
+    const suggestion = text.trim().slice(0, 20_000);
+    // A new suggestion replaces the previous one as long as the user has not edited it.
+    const draft = textarea.value.trim();
+    textarea.value = !draft || draft === lastSuggestion ? suggestion : `${draft}\n${suggestion}`;
+    lastSuggestion = suggestion;
+    if (!state.panelOpen) {
+      state.panelOpen = true;
+      store.set("panelOpen", "1");
+      update();
+    }
+    textarea.focus();
+    toast("Suggested by the page – review it and press Send");
+  });
 
   let frameSrc = null;
   function loadFrame(force = false) {
@@ -345,7 +386,11 @@ async function renderViewer(id) {
   const events = new EventSource(`/api/artifacts/${id}/events`);
   events.addEventListener("open", () => liveDot.classList.add("on"));
   events.addEventListener("error", () => liveDot.classList.remove("on"));
-  events.addEventListener("hello", () => loadMeta().catch(() => {})); // resync after reconnects
+  events.addEventListener("hello", (e) => { // resync after reconnects
+    showListening(JSON.parse(e.data).listening === true);
+    loadMeta().catch(() => {});
+  });
+  events.addEventListener("listening", (e) => setListening(JSON.parse(e.data).listening));
   events.addEventListener("version", async (e) => {
     const { version } = JSON.parse(e.data);
     const wasFollowing = following();

@@ -37,7 +37,11 @@ Just talk to your agent, e.g. "explain this as a diagram" or "show me three draf
 
 What you say explicitly wins, e.g. "just show it" or "wait for my feedback". The agent talks to you in your language.
 
+In the feedback loop, the comment panel shows whether the agent is currently waiting for your feedback. Comments you write in a row reach it together: it waits until you pause for 5 seconds. For choices, the agent can put buttons or inputs into the page; clicking one fills the comment box, and you send it.
+
 **Picking up an artifact in another session:** click "⧉ Copy for agent" in the viewer and paste the reference into the session. The id is also the last path segment of every viewer URL (`/a/<id>`).
+
+**Suggesting a comment from the page:** artifact code can call `parent.postMessage({ type: "web-artefacts:comment", text: "…" }, "*")`. The viewer only fills the comment box with the text; nothing is sent without the user.
 
 MCP tools cannot notify the agent on their own. Every tool result therefore ends with a note when any artifact has open comments.
 
@@ -49,7 +53,7 @@ MCP tools cannot notify the agent on their own. Every tool result therefore ends
 | `list_artifacts()` | All artifacts, including open comment counts |
 | `read_artifact(id, version?)` | HTML source of a version |
 | `read_comments(id, include_resolved?)` | Comments (default: open ones only) |
-| `wait_for_comments(id, timeout_seconds?)` | Waits until you comment in the viewer (default 300 s, max 600 s) |
+| `wait_for_comments(id, timeout_seconds?)` | Waits until you comment in the viewer (default 300 s, max 600 s), then until you pause for 5 s, and returns all new comments |
 | `resolve_comments(id, comment_ids, note?)` | Mark as resolved, optionally with a reply shown in the viewer |
 
 ## Commands
