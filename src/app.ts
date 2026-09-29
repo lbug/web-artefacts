@@ -8,25 +8,25 @@ import { streamSSE } from "hono/streaming";
 import { createMcpHandler } from "@modelcontextprotocol/server";
 import { createMcpServer } from "../mcp/tools.ts";
 import { VERSION } from "./version.ts";
+import { CDN_ORIGINS as CDNS, FONT_FILE_ORIGIN, FONT_STYLE_ORIGIN } from "./allowed-origins.ts";
 import { rawOrigin, viewerOrigin, type Config } from "./config.ts";
-import { isValidId, NotFound, type Store } from "./store.ts";
+import { isValidId, NotFound, type Anchor, type Store } from "./store.ts";
 
 export const MAX_HTML_BYTES = 10 * 1024 * 1024;
 const MAX_WAIT_SECONDS = 600;
 const MAX_SETTLE_SECONDS = 30;
 
-// Where artifact HTML may load scripts, styles and fonts from. Everything else
-// (including arbitrary fetch targets) is blocked, so artifact code cannot send
-// data anywhere.
-const CDNS = ["https://cdnjs.cloudflare.com", "https://cdn.jsdelivr.net", "https://unpkg.com", "https://esm.sh"];
+// Artifact HTML may load scripts, styles and fonts only from the allowed
+// origins. Everything else (including arbitrary fetch targets) is blocked, so
+// artifact code cannot send data anywhere.
 
 export const RAW_CSP = [
   // Applies the sandbox even when the raw URL is opened directly in a tab.
   "sandbox allow-scripts allow-modals allow-downloads",
   "default-src 'none'",
   `script-src 'unsafe-inline' 'unsafe-eval' blob: ${CDNS.join(" ")}`,
-  `style-src 'unsafe-inline' https://fonts.googleapis.com ${CDNS.join(" ")}`,
-  `font-src data: https://fonts.gstatic.com ${CDNS.join(" ")}`,
+  `style-src 'unsafe-inline' ${FONT_STYLE_ORIGIN} ${CDNS.join(" ")}`,
+  `font-src data: ${FONT_FILE_ORIGIN} ${CDNS.join(" ")}`,
   `img-src data: blob: ${CDNS.join(" ")}`,
   "media-src data: blob:",
   `connect-src ${CDNS.join(" ")}`,
@@ -41,7 +41,8 @@ export type ChangeEvent =
   | { type: "version"; version: number }
   | { type: "comment"; commentId: number }
   | { type: "resolved" }
-  | { type: "listening"; listening: boolean };
+  | { type: "listening"; listening: boolean }
+  | { type: "errors"; version: number };
 type Listener = (e: ChangeEvent) => void;
 
 export class Bus {
@@ -109,6 +110,13 @@ function requireHtml(body: Record<string, unknown>): string {
 }
 
 const optString = (v: unknown, max = 200) => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : undefined);
+
+function optAnchor(v: unknown): Anchor | null {
+  if (!v || typeof v !== "object") return null;
+  const { selector, text } = v as Record<string, unknown>;
+  const sel = optString(selector, 500);
+  return sel ? { selector: sel, text: optString(text, 200) ?? "" } : null;
+}
 
 function onError(err: Error, c: Context) {
   if (err instanceof HTTPException) return c.json({ error: err.message }, err.status);
@@ -245,10 +253,13 @@ export function createViewerApp(cfg: Config, store: Store, bus: Bus) {
     const seconds = (name: string, max: number) => Math.min(Math.max(Number(c.req.query(name) ?? 0) || 0, 0), max);
     const wait = seconds("wait", MAX_WAIT_SECONDS);
     const settle = seconds("settle", MAX_SETTLE_SECONDS);
+    // With `errors_after`, browser errors on the latest version newer than
+    // that id also end the wait, so an agent learns that its page is broken.
+    const errorsAfter = c.req.query("errors_after") === undefined ? null : Number(c.req.query("errors_after")) || 0;
     const signal = c.req.raw.signal;
 
-    // Resolves true when a comment arrives within `ms`, false on timeout or abort.
-    const nextComment = (ms: number) =>
+    // Resolves true when an event of one of `types` arrives within `ms`, false on timeout or abort.
+    const nextEvent = (ms: number, types: ChangeEvent["type"][]) =>
       new Promise<boolean>((resolve) => {
         const done = (arrived: boolean) => {
           off();
@@ -257,26 +268,33 @@ export function createViewerApp(cfg: Config, store: Store, bus: Bus) {
           resolve(arrived);
         };
         const aborted = () => done(false);
-        const off = bus.on(id, (e) => e.type === "comment" && done(true));
+        const off = bus.on(id, (e) => types.includes(e.type) && done(true));
         const timer = setTimeout(() => done(false), ms);
         signal.addEventListener("abort", aborted);
       });
 
     const fetchNew = async () => (await store.comments(id, includeResolved)).filter((cm) => cm.id > after);
+    const fetchErrors = async () =>
+      errorsAfter === null ? [] : (await store.errors(id, (await store.get(id)).latest_version)).filter((e) => e.id > errorsAfter);
     const stopListening = wait > 0 ? bus.listen(id) : () => {};
     try {
       let comments = await fetchNew();
+      let errors = await fetchErrors();
       const deadline = Date.now() + wait * 1000;
-      while (comments.length === 0 && Date.now() < deadline && !signal.aborted) {
-        await nextComment(deadline - Date.now());
-        comments = await fetchNew();
+      while (comments.length === 0 && errors.length === 0 && Date.now() < deadline && !signal.aborted) {
+        await nextEvent(deadline - Date.now(), ["comment", "errors"]);
+        [comments, errors] = await Promise.all([fetchNew(), fetchErrors()]);
       }
       if (comments.length > 0 && wait > 0 && settle > 0) {
         const settleDeadline = Date.now() + MAX_SETTLE_SECONDS * 1000;
-        while (Date.now() < settleDeadline && (await nextComment(Math.min(settle * 1000, settleDeadline - Date.now()))));
-        comments = await fetchNew();
+        while (Date.now() < settleDeadline && (await nextEvent(Math.min(settle * 1000, settleDeadline - Date.now()), ["comment"])));
+        [comments, errors] = await Promise.all([fetchNew(), fetchErrors()]);
       }
-      return c.json({ comments, timed_out: comments.length === 0 && wait > 0 });
+      return c.json({
+        comments,
+        ...(errorsAfter === null ? {} : { errors }),
+        timed_out: comments.length === 0 && errors.length === 0 && wait > 0,
+      });
     } finally {
       stopListening();
     }
@@ -297,6 +315,7 @@ export function createViewerApp(cfg: Config, store: Store, bus: Bus) {
       body: text,
       source,
       resolved: body.resolved === true,
+      anchor: optAnchor(body.anchor),
     });
     bus.emit(id, { type: "comment", commentId: comment.id });
     return c.json(comment, 201);
@@ -309,6 +328,26 @@ export function createViewerApp(cfg: Config, store: Store, bus: Bus) {
     await store.setResolved(id, ids, body.resolved !== false);
     bus.emit(id, { type: "resolved" });
     return c.json({ ok: true });
+  });
+
+  // Browser errors the viewer saw while showing a version (reported by the
+  // frame script, see public/frame.js).
+  app.post("/api/artifacts/:id/versions/:version/errors", async (c) => {
+    const id = paramId(c);
+    const version = paramVersion(c);
+    const body = await jsonBody(c);
+    if (!Array.isArray(body.messages)) throw new HTTPException(400, { message: "Field 'messages' must be a list" });
+    // Repeated messages are repeated occurrences: the store counts them.
+    const messages = body.messages.slice(0, 100).map((m) => optString(m, 500)).filter((m): m is string => !!m);
+    await store.addErrors(id, version, messages);
+    bus.emit(id, { type: "errors", version });
+    return c.json({ ok: true });
+  });
+
+  app.get("/api/artifacts/:id/errors", async (c) => {
+    const id = paramId(c);
+    const version = Number(c.req.query("version")) || (await store.get(id)).latest_version;
+    return c.json({ version, errors: await store.errors(id, version) });
   });
 
   // Live updates for open viewers.
@@ -366,17 +405,43 @@ export function createViewerApp(cfg: Config, store: Store, bus: Bus) {
 
 // --- Raw artifact origin ----------------------------------------------------
 
+// Every artifact page loads this script first (public/frame.js): it reports
+// errors to the viewer and lets the user point at elements. It is a separate
+// file rather than inline code so line numbers in error messages still match
+// the artifact's source.
+export const FRAME_SCRIPT_PATH = "/_wa/frame.js";
+const FRAME_TAG = `<script src="${FRAME_SCRIPT_PATH}"></script>`;
+
+/** Inserts the frame script tag right after the doctype (or at the very start), without adding a line. */
+export function withFrameScript(html: string): string {
+  const doctype = /^\uFEFF?\s*<!doctype[^>]*>/i.exec(html);
+  return doctype ? doctype[0] + FRAME_TAG + html.slice(doctype[0].length) : FRAME_TAG + html;
+}
+
 export function createRawApp(cfg: Config, store: Store) {
   const app = new Hono();
   const allowedHosts = new Set([`127.0.0.1:${cfg.rawPort}`, `localhost:${cfg.rawPort}`, `${cfg.host}:${cfg.rawPort}`]);
   app.onError(onError);
+  app.use("*", async (c, next) => {
+    if (!allowedHosts.has(c.req.header("host") ?? "")) return c.text("Unknown host", 421);
+    await next();
+  });
+
+  // The CSP names the frame script by its full URL, so artifacts still cannot
+  // load anything else from this origin.
+  const frameScriptSources = [...new Set([rawOrigin(cfg), `http://localhost:${cfg.rawPort}`])].map((o) => `${o}${FRAME_SCRIPT_PATH}`).join(" ");
+  const csp = RAW_CSP.replace(/script-src ([^;]*)/, `script-src $1 ${frameScriptSources}`);
+
+  app.get(FRAME_SCRIPT_PATH, async (c) => {
+    const body = await readFile(new URL("../public/frame.js", import.meta.url), "utf8");
+    return c.body(body, 200, { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff" });
+  });
 
   app.get("/raw/:id/:version", async (c) => {
-    if (!allowedHosts.has(c.req.header("host") ?? "")) return c.text("Unknown host", 421);
     const { html } = await store.html(paramId(c), paramVersion(c));
-    return c.body(html, 200, {
+    return c.body(withFrameScript(html), 200, {
       "Content-Type": "text/html; charset=utf-8",
-      "Content-Security-Policy": `${RAW_CSP}; frame-ancestors ${viewerOrigin(cfg)} http://localhost:${cfg.viewerPort}`,
+      "Content-Security-Policy": `${csp}; frame-ancestors ${viewerOrigin(cfg)} http://localhost:${cfg.viewerPort}`,
       "X-Content-Type-Options": "nosniff",
       "Referrer-Policy": "no-referrer",
       // Versions are immutable.

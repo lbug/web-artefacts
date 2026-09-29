@@ -39,21 +39,29 @@ What you say explicitly wins, e.g. "just show it" or "wait for my feedback". The
 
 In the feedback loop, the comment panel shows whether the agent is currently waiting for your feedback. Comments you write in a row reach it together: it waits until you pause for 5 seconds. For decisions, the agent can put buttons or inputs into the page: your choices collect next to the comment box, and you send them together with your comment.
 
+**Pointing at an element:** click "Point at element" at the bottom right of the preview, then an element in the page (Esc cancels). The comment then carries that element, so "make this bigger" is unambiguous for the agent. Clicking the element reference in a comment highlights it in the page again.
+
+**Errors in the page:** while you look at a page, the viewer notices JavaScript errors, failed loads and requests blocked by the CSP. It shows them in the top bar and reports them to the agent: a waiting agent returns at once, other tools mention them, and `read_artifact` lists them.
+
+**Resource checks on publish:** before anyone looks at a page, `publish_artifact` checks its external resources. Files on the allowed CDNs get a `HEAD` request (redirects are followed only within those hosts), so a guessed library version that does not exist shows up as "CDN resource returned 404". URLs on any other host are reported as blocked by the CSP, without a request. The warnings come with the tool result; publishing still succeeds.
+
 **Picking up an artifact in another session:** click "⧉ Copy for agent" in the viewer and paste the reference into the session. The id is also the last path segment of every viewer URL (`/a/<id>`).
 
 **Choices from the page:** artifact code can call `parent.postMessage({ type: "web-artefacts:choice", key: "draft", text: "Draft B" }, "*")`. The viewer shows each choice as a removable chip next to the comment box and sends all of them with the user's next comment; nothing is sent without the user. A choice with the same `key` replaces the previous one, choices without a key add up.
 
-MCP tools cannot notify the agent on their own. Every tool result therefore ends with a note when any artifact has open comments.
+MCP tools cannot notify the agent on their own. Every tool result therefore ends with a note when any artifact has open comments or browser errors on its latest version.
+
+Every artifact page loads a small script from the raw origin first (`/_wa/frame.js`). It reports errors and handles pointing, and talks to the viewer only through `postMessage`. The stored HTML is not changed, and the script tag is inserted without adding a line, so line numbers in error messages match the source.
 
 ## Tools
 
 | Tool | Purpose |
 |---|---|
-| `publish_artifact(path \| html, title, id?)` | Without `id` a new artifact, with `id` a new version of the same URL. Identical HTML and title return the existing version instead of creating a new one |
-| `list_artifacts()` | All artifacts, including open comment counts |
-| `read_artifact(id, version?)` | HTML source of a version |
-| `read_comments(id, include_resolved?)` | Comments (default: open ones only) |
-| `wait_for_comments(id, timeout_seconds?)` | Waits until you comment in the viewer (default 300 s, max 600 s), then until you pause for 5 s, and returns all new comments |
+| `publish_artifact(path \| html, title, id?)` | Without `id` a new artifact, with `id` a new version of the same URL. Identical HTML and title return the existing version instead of creating a new one. Warns about missing CDN files and blocked hosts. `path` is preferred: the agent edits its file and a revision costs only the edit |
+| `list_artifacts()` | All artifacts, including open comment and browser error counts |
+| `read_artifact(id, version?)` | HTML source of a version, plus the browser errors reported for it |
+| `read_comments(id, include_resolved?)` | Comments (default: open ones only), with the element each one points at |
+| `wait_for_comments(id, timeout_seconds?)` | Waits until you comment in the viewer (default 300 s, max 600 s), then until you pause for 5 s, and returns all new comments. Returns early when the page reports browser errors |
 | `resolve_comments(id, comment_ids, note?)` | Mark as resolved, optionally with a reply shown in the viewer |
 
 ## Commands

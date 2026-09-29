@@ -7,17 +7,24 @@ import { isAbsolute, resolve } from "node:path";
 import { McpServer, type ServerContext } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { VERSION } from "../src/version.ts";
+import { checkResources } from "./resources.ts";
 
 export type Fetch = (path: string, init?: RequestInit) => Promise<Response>;
 
 export const SERVER_INSTRUCTIONS = `web-artefacts publishes self-contained HTML pages to a local viewer, where the user looks at them in the browser and can leave comments.
 
-HTML: inline CSS/JS. External scripts, styles and images only from cdnjs.cloudflare.com, cdn.jsdelivr.net, unpkg.com or esm.sh; fonts from Google Fonts; your own images as data: URLs or inline SVG. fetch() to other hosts, form targets, cookies and localStorage are blocked.
+HTML: inline CSS/JS. External scripts, styles and images only from cdnjs.cloudflare.com, cdn.jsdelivr.net, unpkg.com or esm.sh; fonts from Google Fonts; your own images as data: URLs or inline SVG. fetch() to other hosts, form targets, cookies and localStorage are blocked. Use library versions you know exist rather than guessing; publish_artifact checks CDN URLs and warns about missing files and blocked hosts.
+
+Saving tokens: write the page to a local file, revise it with small edits and publish it with path. A new version then costs only your edit, not the whole page. Pass html only for one-off pages. Call read_artifact only when you have no local file (e.g. in another session), then save the source to a file and continue with path.
 
 Two ways to use it – pick one based on the request:
 A) Show (default): the user wants something explained, visualized or summarized. → publish_artifact, give the URL, done. Do not wait for comments; follow-up questions come through the chat.
 B) Feedback loop: you present alternatives or a draft for a decision, or the user explicitly wants to iterate in the viewer. → publish_artifact, give the URL, say that you are waiting for comments in the viewer (replying in the chat works too), then wait_for_comments. Apply the comments, republish with the same id, call resolve_comments with a short note, wait again – until the user is satisfied or continues in the chat.
 If the user explicitly says otherwise ("just show it", "wait for my feedback"), follow that.
+
+Comments can carry an anchor { selector, text }: the element the user pointed at in the version the comment was written on.
+
+While the viewer shows a page, it reports JavaScript errors, failed loads and requests blocked by the CSP. They end wait_for_comments, show up in notes and in read_artifact. Fix them in a new version; the user may not notice them.
 
 Letting the user answer with clicks: when you ask for choices or values (pick a draft, tune a color), give the page buttons or inputs that call parent.postMessage({ type: "web-artefacts:choice", key: "draft", text: "Draft B" }, "*"). Choices collect next to the comment box in the viewer and go out together with the user's next comment, as "- <text>" lines. Give each question its own key: a new choice with the same key replaces the earlier answer, so the user can change their mind and still answer several questions in one message. Make each text self-explanatory, since it is all you receive.
 
@@ -71,7 +78,17 @@ interface Comment {
   body: string;
   created_at: string;
   resolved_at: string | null;
+  anchor: { selector: string; text: string } | null;
 }
+
+interface BrowserError {
+  id: number;
+  version: number;
+  message: string;
+  count: number;
+}
+
+const formatErrors = (errors: BrowserError[]) => errors.map((e) => `- ${e.message}${e.count > 1 ? ` (×${e.count})` : ""}`).join("\n");
 
 interface ArtifactSummary {
   id: string;
@@ -80,6 +97,7 @@ interface ArtifactSummary {
   updated_at: string;
   latest_agent: string | null;
   open_comments: number;
+  latest_errors: number;
   url: string;
 }
 
@@ -94,6 +112,7 @@ const PublishedSchema = z.object({
   title: z.string(),
   url: z.string(),
   next_step: z.string(),
+  warnings: z.array(z.string()).optional().describe("Resources the page will fail to load; fix them in a new version"),
   note: z.string().optional(),
 });
 
@@ -106,6 +125,7 @@ const ListSchema = z.object({
       updated_at: z.string(),
       latest_agent: z.string().nullable(),
       open_comments: z.number().int(),
+      browser_errors: z.number().int().describe("Distinct browser errors the viewer reported for the latest version"),
       url: z.string(),
     }),
   ),
@@ -126,16 +146,26 @@ export function createMcpServer(opts: { fetchApi: Fetch; cwd?: string; fallbackA
   };
 
   // Tools cannot push to the agent, so every tool response carries a note
-  // about open user comments. `skip` excludes the artifact whose comments the
-  // tool has just returned.
+  // about open user comments and browser errors. `skip` excludes the artifact
+  // whose comments and errors the tool has just returned.
   async function openCommentsHint(skip?: string): Promise<string> {
     try {
-      const list = await api<ArtifactSummary[]>(fetchApi, "/api/artifacts");
-      const open = list.filter((a) => a.open_comments > 0 && a.id !== skip);
-      if (open.length === 0) return "";
-      const items = open.slice(0, 5).map((a) => `"${a.title}" (id ${a.id}): ${a.open_comments}`);
-      if (open.length > 5) items.push(`and ${open.length - 5} more`);
-      return `\n\n---\nNote: open user comments – ${items.join("; ")}. Read them with read_comments before you continue working on these artifacts.`;
+      const list = (await api<ArtifactSummary[]>(fetchApi, "/api/artifacts")).filter((a) => a.id !== skip);
+      const items = (artifacts: ArtifactSummary[], label: (a: ArtifactSummary) => string) => {
+        const shown = artifacts.slice(0, 5).map(label);
+        if (artifacts.length > 5) shown.push(`and ${artifacts.length - 5} more`);
+        return shown.join("; ");
+      };
+      const notes: string[] = [];
+      const open = list.filter((a) => a.open_comments > 0);
+      if (open.length > 0) {
+        notes.push(`Note: open user comments – ${items(open, (a) => `"${a.title}" (id ${a.id}): ${a.open_comments}`)}. Read them with read_comments before you continue working on these artifacts.`);
+      }
+      const broken = list.filter((a) => a.latest_errors > 0);
+      if (broken.length > 0) {
+        notes.push(`Note: browser errors on the latest version – ${items(broken, (a) => `"${a.title}" (id ${a.id}) v${a.latest_version}: ${a.latest_errors}`)}. Read them with read_artifact and fix them in a new version.`);
+      }
+      return notes.length ? `\n\n---\n${notes.join("\n")}` : "";
     } catch {
       return "";
     }
@@ -166,7 +196,7 @@ export function createMcpServer(opts: { fetchApi: Fetch; cwd?: string; fallbackA
     {
       title: "Publish artifact",
       description:
-        "Publishes an HTML page to the artifact viewer and returns its URL. Without id a new artifact is created; with id a new version of the same URL is published (open viewers reload it live). Pass either path (a local .html file) or html.",
+        "Publishes an HTML page to the artifact viewer and returns its URL. Without id a new artifact is created; with id a new version of the same URL is published (open viewers reload it live). Pass either path (a local .html file; preferred, so revisions only need small edits to the file) or html. Warns about CDN files that do not exist and resources on hosts the viewer blocks.",
       inputSchema: z.object({
         path: z.string().optional().describe("Path to a local HTML file (absolute, or relative to the working directory)"),
         html: z.string().optional().describe("HTML content, if there is no file"),
@@ -183,17 +213,21 @@ export function createMcpServer(opts: { fetchApi: Fetch; cwd?: string; fallbackA
         if (!isAbsolute(path) && !opts.cwd) return fail("path must be absolute.");
         content = await readFile(isAbsolute(path) ? path : resolve(opts.cwd!, path), "utf8");
       }
+      // Runs while the version is saved, so it adds little or no latency.
+      const checking = checkResources(content);
       const res = await api<z.infer<typeof PublishedSchema> & { unchanged?: boolean }>(
         fetchApi,
         id ? `/api/artifacts/${encodeURIComponent(id)}/versions` : "/api/artifacts",
         { method: "POST", body: JSON.stringify({ html: content, title, agent: agentName(ctx) }) },
       );
+      const warnings = await checking;
       const next_step = res.unchanged
         ? `Unchanged: the HTML and title are identical to v${res.version}, so no new version was created. Change the content before publishing again with id "${res.id}".`
         : `Give the user this URL in your reply (also for new versions). For revisions call publish_artifact with id "${res.id}".`;
-      const published = { id: res.id, version: res.version, title: res.title, url: res.url, next_step };
+      const published = { id: res.id, version: res.version, title: res.title, url: res.url, next_step, ...(warnings.length ? { warnings } : {}) };
       const heading = res.unchanged ? "Unchanged" : "Published";
-      return text(`${heading}: "${res.title}" v${res.version}\nURL: ${res.url}\nid: ${res.id}\n\n${next_step}`, published);
+      const warningText = warnings.length ? `\n\nWarnings:\n${warnings.map((w) => `- ${w}`).join("\n")}` : "";
+      return text(`${heading}: "${res.title}" v${res.version}\nURL: ${res.url}\nid: ${res.id}\n\n${next_step}${warningText}`, published);
     }),
   );
 
@@ -207,8 +241,8 @@ export function createMcpServer(opts: { fetchApi: Fetch; cwd?: string; fallbackA
     },
     tool(async () => {
       const list = await api<ArtifactSummary[]>(fetchApi, "/api/artifacts");
-      const artifacts = list.map(({ id, title, latest_version, updated_at, latest_agent, open_comments, url }) => ({
-        id, title, latest_version, updated_at, latest_agent, open_comments, url,
+      const artifacts = list.map(({ id, title, latest_version, updated_at, latest_agent, open_comments, latest_errors, url }) => ({
+        id, title, latest_version, updated_at, latest_agent, open_comments, browser_errors: latest_errors, url,
       }));
       return text(JSON.stringify(artifacts, null, 2), { artifacts });
     }, "none"),
@@ -218,7 +252,7 @@ export function createMcpServer(opts: { fetchApi: Fetch; cwd?: string; fallbackA
     "read_artifact",
     {
       title: "Read artifact",
-      description: "Returns the HTML source of a version (default: latest) plus metadata.",
+      description: "Returns the HTML source of a version (default: latest) plus metadata and the browser errors the viewer reported for it. The full source can be large: prefer your local file if you have one.",
       inputSchema: z.object({
         id: idParam,
         version: z.number().int().positive().optional(),
@@ -232,14 +266,16 @@ export function createMcpServer(opts: { fetchApi: Fetch; cwd?: string; fallbackA
       if (html.length > MAX_READ_CHARS) {
         html = `${html.slice(0, MAX_READ_CHARS)}\n\n[… truncated: ${html.length - MAX_READ_CHARS} of ${html.length} characters omitted]`;
       }
-      return text(`# ${meta.title} — version ${v} of ${meta.latest_version}\nURL: ${meta.url}\n\n${html}`);
+      const { errors } = await api<{ errors: BrowserError[] }>(fetchApi, `/api/artifacts/${encodeURIComponent(id)}/errors?version=${v}`);
+      const errorSection = errors.length ? `\nBrowser errors the viewer reported for this version:\n${formatErrors(errors)}\n` : "";
+      return text(`# ${meta.title} — version ${v} of ${meta.latest_version}\nURL: ${meta.url}\n${errorSection}\n${html}`);
     }),
   );
 
   const formatComments = (comments: Comment[]) =>
     JSON.stringify(
-      comments.map(({ id, version, author, body, created_at, resolved_at }) => ({
-        id, version, author, body, created_at, ...(resolved_at ? { resolved_at } : {}),
+      comments.map(({ id, version, author, body, created_at, resolved_at, anchor }) => ({
+        id, version, author, body, created_at, ...(resolved_at ? { resolved_at } : {}), ...(anchor ? { anchor } : {}),
       })),
       null,
       2,
@@ -270,7 +306,7 @@ export function createMcpServer(opts: { fetchApi: Fetch; cwd?: string; fallbackA
     {
       title: "Wait for feedback",
       description:
-        "Waits until the user writes new comments in the viewer and returns them; after the first comment it waits until the user pauses for a few seconds, so comments written in a row arrive together. Only use it in the feedback loop, after you published a version and asked the user for feedback. On timeout, call it again or ask the user.",
+        "Waits until the user writes new comments in the viewer and returns them; after the first comment it waits until the user pauses for a few seconds, so comments written in a row arrive together. It also returns early when the page reports browser errors in the viewer. Only use it in the feedback loop, after you published a version and asked the user for feedback. On timeout, call it again or ask the user.",
       inputSchema: z.object({
         id: idParam,
         after_comment_id: z.number().int().optional().describe("Only comments with a greater id. Default: only comments written from now on"),
@@ -286,6 +322,9 @@ export function createMcpServer(opts: { fetchApi: Fetch; cwd?: string; fallbackA
         const { comments } = await api<{ comments: Comment[] }>(fetchApi, `${base}?include_resolved=true`, { signal });
         after = comments.at(-1)?.id ?? 0;
       }
+      // Only errors reported from now on end the wait; known ones are in the notes.
+      const known = await api<{ errors: BrowserError[] }>(fetchApi, `/api/artifacts/${encodeURIComponent(id)}/errors`, { signal });
+      const errorsAfter = Math.max(0, ...known.errors.map((e) => e.id));
 
       // Long-poll in short chunks: that keeps us responsive to cancellation,
       // lets clients that asked for progress see a heartbeat (which also
@@ -295,10 +334,15 @@ export function createMcpServer(opts: { fetchApi: Fetch; cwd?: string; fallbackA
       const deadline = started + total * 1000;
       const progressToken = ctx.mcpReq._meta?.progressToken;
       let comments: Comment[] = [];
-      while (comments.length === 0 && Date.now() < deadline && !signal.aborted) {
+      let errors: BrowserError[] = [];
+      while (comments.length === 0 && errors.length === 0 && Date.now() < deadline && !signal.aborted) {
         const chunk = Math.max(1, Math.min(30, Math.round((deadline - Date.now()) / 1000)));
-        ({ comments } = await api<{ comments: Comment[] }>(fetchApi, `${base}?after=${after}&wait=${chunk}&settle=${SETTLE_SECONDS}`, { signal }));
-        if (comments.length === 0 && progressToken !== undefined) {
+        ({ comments, errors } = await api<{ comments: Comment[]; errors: BrowserError[] }>(
+          fetchApi,
+          `${base}?after=${after}&wait=${chunk}&settle=${SETTLE_SECONDS}&errors_after=${errorsAfter}`,
+          { signal },
+        ));
+        if (comments.length === 0 && errors.length === 0 && progressToken !== undefined) {
           const elapsed = Math.round((Date.now() - started) / 1000);
           await ctx.mcpReq
             .notify({
@@ -308,8 +352,12 @@ export function createMcpServer(opts: { fetchApi: Fetch; cwd?: string; fallbackA
             .catch(() => {});
         }
       }
-      if (comments.length === 0) return text(`No new comment within ${total} s (after_comment_id=${after}).`);
-      return text(formatComments(comments));
+      const errorNote = errors.length
+        ? `The page reported errors in the viewer on v${errors[0].version}:\n${formatErrors(errors)}\nFix them in a new version.`
+        : "";
+      if (comments.length > 0) return text(errorNote ? `${formatComments(comments)}\n\n${errorNote}` : formatComments(comments));
+      if (errorNote) return text(`No new comment yet, but ${errorNote.charAt(0).toLowerCase()}${errorNote.slice(1)}`);
+      return text(`No new comment within ${total} s (after_comment_id=${after}).`);
     }, "except-self"),
   );
 

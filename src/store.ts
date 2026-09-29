@@ -24,6 +24,8 @@ export interface ArtifactRow {
   version_count: number;
   latest_agent: string | null;
   open_comments: number;
+  /** Distinct browser errors the viewer reported for the latest version. */
+  latest_errors: number;
 }
 
 export interface VersionRow {
@@ -35,6 +37,12 @@ export interface VersionRow {
   created_at: string;
 }
 
+/** The element a comment points at in the version it was written on. */
+export interface Anchor {
+  selector: string;
+  text: string;
+}
+
 export interface CommentRow {
   id: number;
   version: number;
@@ -43,7 +51,26 @@ export interface CommentRow {
   body: string;
   created_at: string;
   resolved_at: string | null;
+  anchor: Anchor | null;
 }
+
+export interface ErrorRow {
+  id: number;
+  version: number;
+  message: string;
+  count: number;
+  first_seen: string;
+  last_seen: string;
+}
+
+/** Distinct error messages kept per version, so a broken page cannot flood the database. */
+export const MAX_ERRORS_PER_VERSION = 20;
+
+const COMMENT_COLUMNS = "id, version, author, source, body, created_at, resolved_at, anchor";
+const parseComment = (row: Omit<CommentRow, "anchor"> & { anchor: string | null }): CommentRow => ({
+  ...row,
+  anchor: row.anchor ? JSON.parse(row.anchor) : null,
+});
 
 export class NotFound extends Error {}
 
@@ -72,7 +99,9 @@ const ARTIFACT_SELECT = `
          (SELECT MAX(version) FROM versions v WHERE v.artifact_id = a.id) AS latest_version,
          (SELECT COUNT(*) FROM versions v WHERE v.artifact_id = a.id) AS version_count,
          (SELECT agent FROM versions v WHERE v.artifact_id = a.id ORDER BY version DESC LIMIT 1) AS latest_agent,
-         (SELECT COUNT(*) FROM comments c WHERE c.artifact_id = a.id AND c.resolved_at IS NULL) AS open_comments
+         (SELECT COUNT(*) FROM comments c WHERE c.artifact_id = a.id AND c.resolved_at IS NULL) AS open_comments,
+         (SELECT COUNT(*) FROM errors e WHERE e.artifact_id = a.id
+            AND e.version = (SELECT MAX(version) FROM versions v WHERE v.artifact_id = a.id)) AS latest_errors
   FROM artifacts a`;
 
 export class Store {
@@ -156,26 +185,55 @@ export class Store {
     return { version: v, html };
   }
 
-  comments(id: string, includeResolved = true): Promise<CommentRow[]> {
-    return this.sql.all<CommentRow>(
-      `SELECT id, version, author, source, body, created_at, resolved_at FROM comments
+  async comments(id: string, includeResolved = true): Promise<CommentRow[]> {
+    const rows = await this.sql.all<Parameters<typeof parseComment>[0]>(
+      `SELECT ${COMMENT_COLUMNS} FROM comments
        WHERE artifact_id = ? ${includeResolved ? "" : "AND resolved_at IS NULL"} ORDER BY id`,
       id,
     );
+    return rows.map(parseComment);
   }
 
   async addComment(
     id: string,
-    input: { version: number; author: string; body: string; source: "user" | "agent"; resolved?: boolean },
+    input: { version: number; author: string; body: string; source: "user" | "agent"; resolved?: boolean; anchor?: Anchor | null },
   ): Promise<CommentRow> {
     await this.get(id);
     const now = new Date().toISOString();
-    const row = await this.sql.first<CommentRow>(
-      `INSERT INTO comments (artifact_id, version, author, source, body, created_at, resolved_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-       RETURNING id, version, author, source, body, created_at, resolved_at`,
+    const row = await this.sql.first<Parameters<typeof parseComment>[0]>(
+      `INSERT INTO comments (artifact_id, version, author, source, body, created_at, resolved_at, anchor) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       RETURNING ${COMMENT_COLUMNS}`,
       id, input.version, input.author, input.source, input.body, now, input.resolved ? now : null,
+      input.anchor ? JSON.stringify(input.anchor) : null,
     );
-    return row!;
+    return parseComment(row!);
+  }
+
+  /** Records errors the viewer saw on a version; repeated messages only raise their count. */
+  async addErrors(id: string, version: number, messages: string[]): Promise<void> {
+    const exists = await this.sql.first("SELECT 1 AS x FROM versions WHERE artifact_id = ? AND version = ?", id, version);
+    if (!exists) throw new NotFound(`Version ${version} of ${id} not found`);
+    const now = new Date().toISOString();
+    for (const message of messages) {
+      const seen = await this.sql.first(
+        "UPDATE errors SET count = count + 1, last_seen = ? WHERE artifact_id = ? AND version = ? AND message = ? RETURNING id",
+        now, id, version, message,
+      );
+      if (seen) continue;
+      const stored = await this.sql.first<{ n: number }>("SELECT COUNT(*) AS n FROM errors WHERE artifact_id = ? AND version = ?", id, version);
+      if (stored!.n >= MAX_ERRORS_PER_VERSION) return;
+      await this.sql.run(
+        "INSERT INTO errors (artifact_id, version, message, count, first_seen, last_seen) VALUES (?, ?, ?, 1, ?, ?)",
+        id, version, message, now, now,
+      );
+    }
+  }
+
+  errors(id: string, version: number): Promise<ErrorRow[]> {
+    return this.sql.all<ErrorRow>(
+      "SELECT id, version, message, count, first_seen, last_seen FROM errors WHERE artifact_id = ? AND version = ? ORDER BY id",
+      id, version,
+    );
   }
 
   async setResolved(id: string, commentIds: number[], resolved: boolean): Promise<void> {

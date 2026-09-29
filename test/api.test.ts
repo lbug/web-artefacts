@@ -8,6 +8,8 @@ import type { Config } from "../src/config.ts";
 import { fileBlobs, openSql } from "../src/storage-node.ts";
 import { Store } from "../src/store.ts";
 
+const FRAME_TAG = '<script src="/_wa/frame.js"></script>';
+
 function setup() {
   const dataDir = mkdtempSync(join(tmpdir(), "artefacts-test-"));
   const cfg: Config = { host: "127.0.0.1", viewerPort: 4400, rawPort: 4401, dataDir };
@@ -112,8 +114,9 @@ test("raw origin serves sandboxed HTML with strict CSP", async () => {
   const a = await (await call("/api/artifacts", { method: "POST", json: { html: "<p>hi</p>", title: "T" } })).json();
   const res = await raw.request(`http://127.0.0.1:4401/raw/${a.id}/1`, { headers: { host: "127.0.0.1:4401" } });
   assert.equal(res.status, 200);
-  assert.equal(await res.text(), "<p>hi</p>");
+  assert.equal(await res.text(), `${FRAME_TAG}<p>hi</p>`);
   const csp = res.headers.get("content-security-policy")!;
+  assert.match(csp, /script-src [^;]*http:\/\/127\.0\.0\.1:4401\/_wa\/frame\.js/);
   assert.match(csp, /^sandbox allow-scripts/);
   assert.match(csp, /default-src 'none'/);
   assert.match(csp, /form-action 'none'/);
@@ -125,6 +128,21 @@ test("raw origin serves sandboxed HTML with strict CSP", async () => {
   assert.equal((await raw.request("http://127.0.0.1:4401/api/artifacts", { headers: { host: "127.0.0.1:4401" } })).status, 404);
   assert.equal((await call(`/raw/${a.id}/1`)).status, 404);
   assert.equal((await raw.request(`http://127.0.0.1:4401/raw/${a.id}/9`, { headers: { host: "127.0.0.1:4401" } })).status, 404);
+});
+
+test("raw pages load the frame script right after the doctype, the stored source stays unchanged", async () => {
+  const { call, raw } = setup();
+  const html = "<!DOCTYPE html>\n<html><body><script>boom()</script></body></html>";
+  const a = await (await call("/api/artifacts", { method: "POST", json: { html, title: "T" } })).json();
+  const served = await (await raw.request(`http://127.0.0.1:4401/raw/${a.id}/1`, { headers: { host: "127.0.0.1:4401" } })).text();
+  // Same line count as the source, so error line numbers still match it.
+  assert.equal(served, `<!DOCTYPE html>${FRAME_TAG}\n<html><body><script>boom()</script></body></html>`);
+  assert.equal(await (await call(`/api/artifacts/${a.id}/versions/1`)).text(), html);
+
+  const script = await raw.request("http://127.0.0.1:4401/_wa/frame.js", { headers: { host: "127.0.0.1:4401" } });
+  assert.equal(script.status, 200);
+  assert.match(script.headers.get("content-type")!, /javascript/);
+  assert.match(await script.text(), /web-artefacts:error/);
 });
 
 test("viewer shell has CSP that only frames the raw origin", async () => {
@@ -159,6 +177,56 @@ test("comments: add, filter, resolve, agent notes", async () => {
 
   const listed = (await (await call("/api/artifacts")).json())[0];
   assert.equal(listed.open_comments, 0);
+});
+
+test("comments keep the element the user pointed at", async () => {
+  const { call } = setup();
+  const a = await (await call("/api/artifacts", { method: "POST", json: { html: "x", title: "T" } })).json();
+  const anchor = { selector: "main > section:nth-of-type(2) > h2", text: "Pricing" };
+  const c = await (await call(`/api/artifacts/${a.id}/comments`, { method: "POST", json: { body: "Größer", anchor } })).json();
+  assert.deepEqual(c.anchor, anchor);
+  const plain = await (await call(`/api/artifacts/${a.id}/comments`, { method: "POST", json: { body: "Ohne", anchor: { text: "no selector" } } })).json();
+  assert.equal(plain.anchor, null);
+  const { comments } = await (await call(`/api/artifacts/${a.id}/comments`)).json();
+  assert.deepEqual(comments.map((x: { anchor: unknown }) => x.anchor), [anchor, null]);
+});
+
+test("browser errors are deduplicated, capped and counted for the latest version", async () => {
+  const { call } = setup();
+  const a = await (await call("/api/artifacts", { method: "POST", json: { html: "x", title: "T" } })).json();
+  const report = (version: number, messages: unknown) =>
+    call(`/api/artifacts/${a.id}/versions/${version}/errors`, { method: "POST", json: { messages } });
+  assert.equal((await report(1, ["TypeError: a is undefined", "TypeError: a is undefined", "Blocked"])).status, 200);
+  await report(1, ["Blocked"]);
+  let res = await (await call(`/api/artifacts/${a.id}/errors`)).json();
+  assert.equal(res.version, 1);
+  assert.deepEqual(res.errors.map((e: { message: string; count: number }) => [e.message, e.count]), [["TypeError: a is undefined", 2], ["Blocked", 2]]);
+  assert.equal((await (await call("/api/artifacts")).json())[0].latest_errors, 2);
+
+  await report(1, Array.from({ length: 30 }, (_, i) => `error ${i}`));
+  res = await (await call(`/api/artifacts/${a.id}/errors?version=1`)).json();
+  assert.equal(res.errors.length, 20);
+  assert.equal((await report(1, "not a list")).status, 400);
+  assert.equal((await report(7, ["x"])).status, 404);
+
+  // A new version starts without errors.
+  await call(`/api/artifacts/${a.id}/versions`, { method: "POST", json: { html: "y" } });
+  assert.equal((await (await call("/api/artifacts")).json())[0].latest_errors, 0);
+});
+
+test("long-poll with errors_after also returns when the latest version reports errors", async () => {
+  const { call } = setup();
+  const a = await (await call("/api/artifacts", { method: "POST", json: { html: "x", title: "T" } })).json();
+  await call(`/api/artifacts/${a.id}/versions/1/errors`, { method: "POST", json: { messages: ["old"] } });
+  const { errors: known } = await (await call(`/api/artifacts/${a.id}/errors`)).json();
+  const started = Date.now();
+  const waiting = call(`/api/artifacts/${a.id}/comments?after=0&wait=5&settle=5&errors_after=${known[0].id}`).then((r) => r.json());
+  await new Promise((r) => setTimeout(r, 100));
+  await call(`/api/artifacts/${a.id}/versions/1/errors`, { method: "POST", json: { messages: ["ReferenceError: x is not defined"] } });
+  const res = await waiting;
+  assert.ok(Date.now() - started < 2000, "errors do not wait for the settle window");
+  assert.deepEqual(res.comments, []);
+  assert.deepEqual(res.errors.map((e: { message: string }) => e.message), ["ReferenceError: x is not defined"]);
 });
 
 test("long-poll returns as soon as a user comment arrives, ignores agent notes", async () => {
@@ -238,7 +306,7 @@ test("migrations are versioned and idempotent", async () => {
   const { cfg } = setup();
   const { DatabaseSync } = await import("node:sqlite");
   const db = new DatabaseSync(join(cfg.dataDir, "artifacts.db"));
-  assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 1);
+  assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 2);
   db.close();
   openSql(cfg.dataDir); // reopening must not fail or re-run migrations
 });

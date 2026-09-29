@@ -116,6 +116,39 @@ test("stdio MCP: autostart, publish, revise, comment loop", async (t) => {
   assert.equal(JSON.parse(textOf(listResult))[0].latest_version, 2);
   assert.equal((listResult.structuredContent as { artifacts: Array<{ latest_version: number }> }).artifacts[0].latest_version, 2);
 
+  // Errors the viewer reports for the latest version wake a waiting agent.
+  const waitingForErrors = client.callTool({ name: "wait_for_comments", arguments: { id: published.id, timeout_seconds: 10 } });
+  await new Promise((r) => setTimeout(r, 300));
+  await fetch(`${base}/api/artifacts/${published.id}/versions/2/errors`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ messages: ["ReferenceError: chart is not defined (page:12)"] }),
+  });
+  const errorsText = textOf(await waitingForErrors);
+  assert.match(errorsText, /reported errors in the viewer on v2/);
+  assert.match(errorsText, /ReferenceError: chart is not defined/);
+  assert.match(textOf(await client.callTool({ name: "read_artifact", arguments: { id: published.id } })), /Browser errors[^]*ReferenceError/);
+  // Other tools point the agent to them.
+  const other = textOf(await client.callTool({ name: "publish_artifact", arguments: { html: "<p>other</p>", title: "Other" } }));
+  assert.match(other, /browser errors on the latest version – "Demo" \(id \w+\) v2: 1/);
+
+  // publish_artifact warns about resources the viewer's CSP will block (checked offline).
+  const warned = await client.callTool({
+    name: "publish_artifact",
+    arguments: { id: published.id, html: `<h1 style=color:red>v2</h1><script>fetch("https://api.example.com/data")</script>` },
+  });
+  assert.match(textOf(warned), /Warnings:\n- Blocked by the viewer's CSP \(host not allowed\): https:\/\/api\.example\.com\/data/);
+  assert.deepEqual((warned.structuredContent as { warnings?: string[] }).warnings, ["Blocked by the viewer's CSP (host not allowed): https://api.example.com/data"]);
+
+  // Comments carry the element the user pointed at.
+  await fetch(`${base}/api/artifacts/${published.id}/comments`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ body: "Smaller", anchor: { selector: "h1", text: "v2" } }),
+  });
+  const anchored = JSON.parse(textOf(await client.callTool({ name: "read_comments", arguments: { id: published.id } })));
+  assert.deepEqual(anchored[0].anchor, { selector: "h1", text: "v2" });
+
   const timeout = textOf(await client.callTool({ name: "wait_for_comments", arguments: { id: published.id, timeout_seconds: 1 } }));
   assert.match(timeout, /No new comment/);
 

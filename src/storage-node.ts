@@ -16,7 +16,7 @@ const loadSqlite = () => process.getBuiltinModule("node:sqlite") as typeof impor
 
 // Migrations run in order; PRAGMA user_version records how many have been
 // applied. Append new files here, never edit released ones.
-const MIGRATIONS = ["0001_init.sql"];
+const MIGRATIONS = ["0001_init.sql", "0002_anchors_errors.sql"];
 
 function migrate(db: DatabaseSyncType) {
   const applied = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;

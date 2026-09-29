@@ -184,6 +184,9 @@ async function renderViewer(id) {
   const agentStatus = h("div", { class: "agent-status" });
   const choicesEl = h("div", { class: "choices", "aria-label": "Choices from the page", hidden: true });
   const sendBtn = h("button", { class: "btn primary", onclick: send }, "Send");
+  // Sits on the preview, where the user wants to point.
+  const pickBtn = h("button", { class: "pick", "aria-pressed": "false", title: "Attach a part of the page to your comment", onclick: togglePicking }, "Point at element");
+  const errorsEl = h("span", { class: "errors", hidden: true });
   textarea.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); } });
 
   const panel = h("aside", { class: "panel" },
@@ -191,11 +194,11 @@ async function renderViewer(id) {
     commentsList,
     h("div", { class: "composer" }, agentStatus, choicesEl, textarea, h("div", { class: "row" }, "As", nameInput, forVersion, sendBtn)));
 
-  const body = h("div", { class: "body" }, stage, panel);
+  const body = h("div", { class: "body" }, h("div", { class: "stage-wrap" }, stage, pickBtn), panel);
   root.replaceChildren(h("div", { class: "viewer" },
     h("div", { class: "topbar" },
       h("a", { class: "btn ghost", href: "/", title: "All artifacts" }, "←"),
-      liveDot, titleEl, versionSelect,
+      liveDot, titleEl, errorsEl, versionSelect,
       h("div", { class: "group" }, previewBtn, diffBtn),
       reloadBtn, openBtn, copyBtn, panelBtn),
     body));
@@ -219,9 +222,10 @@ async function renderViewer(id) {
     const body = [[...choices.values()].map((c) => `- ${c}`).join("\n"), text].filter(Boolean).join("\n\n");
     sendBtn.disabled = true;
     try {
-      await api(`/api/artifacts/${id}/comments`, { method: "POST", body: JSON.stringify({ body, version: current(), author: nameInput.value.trim() || "User" }) });
+      await api(`/api/artifacts/${id}/comments`, { method: "POST", body: JSON.stringify({ body, anchor, version: current(), author: nameInput.value.trim() || "User" }) });
       textarea.value = "";
       choices.clear();
+      anchor = null;
       renderChoices();
       await loadMeta();
     } catch (e) {
@@ -244,7 +248,10 @@ async function renderViewer(id) {
     commentsBadge.textContent = open;
     commentsBadge.hidden = open === 0;
     if (shown.length === 0) {
-      commentsList.replaceChildren(h("div", { class: "none" }, all.length ? "All resolved." : "No comments yet. Write below what the agent should change."));
+      commentsList.replaceChildren(all.length
+        ? h("div", { class: "none" }, "All resolved.")
+        : h("div", { class: "none" }, "No comments yet. Write below what the agent should change.",
+          h("p", { class: "tip" }, "Tip: “Point at element” at the bottom right of the preview attaches a part of the page to your comment, so the agent knows what you mean.")));
       return;
     }
     const atBottom = commentsList.scrollHeight - commentsList.scrollTop - commentsList.clientHeight < 40;
@@ -254,6 +261,7 @@ async function renderViewer(id) {
         h("button", { class: "ver", title: "View this version", onclick: () => { state.version = c.version === state.meta.latest_version ? null : c.version; update(); } }, `v${c.version}`),
         h("span", { title: fullDate(c.created_at) }, ago(c.created_at)),
         c.source !== "agent" && h("button", { class: "btn ghost sm act", onclick: () => setResolved(c.id, !c.resolved_at) }, c.resolved_at ? "Reopen" : "✓ Resolve")),
+      c.anchor && h("button", { class: "anchor", title: `Show in the page: ${c.anchor.selector}`, onclick: () => showAnchor(c) }, `⌖ ${anchorLabel(c.anchor)}`),
       h("div", { class: "text" }, c.body))));
     if (atBottom) commentsList.scrollTop = commentsList.scrollHeight;
   }
@@ -281,25 +289,117 @@ async function renderViewer(id) {
   // comment, so sending stays the user's decision. A choice with the same key
   // replaces the earlier answer to that question; without a key, choices add up.
   const choices = new Map(); // key -> text, in the order they were first made
+  // The element the next comment points at: { selector, text } from the frame script.
+  let anchor = null;
+  const anchorLabel = (a) => (a.text ? `“${a.text.length > 40 ? `${a.text.slice(0, 40)}…` : a.text}”` : a.selector.split(" > ").pop());
+  const chip = (label, attrs, onRemove) => h("span", { class: "chip", ...attrs }, label,
+    h("button", { title: "Remove", "aria-label": `Remove "${label}"`, onclick: onRemove }, "×"));
   function renderChoices() {
-    choicesEl.hidden = choices.size === 0;
-    choicesEl.replaceChildren(...[...choices].map(([key, text]) => h("span", { class: "chip" }, text,
-      h("button", { title: "Remove", "aria-label": `Remove "${text}"`, onclick: () => { choices.delete(key); renderChoices(); } }, "×"))));
+    choicesEl.hidden = choices.size === 0 && !anchor;
+    choicesEl.replaceChildren(
+      ...(anchor ? [chip(`⌖ ${anchorLabel(anchor)}`, { class: "chip anchor", title: anchor.selector }, () => { anchor = null; renderChoices(); })] : []),
+      ...[...choices].map(([key, text]) => chip(text, {}, () => { choices.delete(key); renderChoices(); })));
   }
+  function openPanel() {
+    if (state.panelOpen) return;
+    state.panelOpen = true;
+    store.set("panelOpen", "1");
+    update();
+  }
+
+  // The preview frame and whether its page (and the frame script) finished loading.
+  const frameEl = () => stage.querySelector("iframe");
+  let frameReady = false;
+  let frameVersion = null;
+  function whenFrameReady(fn) {
+    const frame = frameEl();
+    if (!frame) return;
+    if (frameReady) fn(frame.contentWindow);
+    else frame.addEventListener("load", () => fn(frame.contentWindow), { once: true });
+  }
+
+  // Pointing: the frame script marks the element under the pointer and reports the clicked one.
+  let picking = false;
+  function setPicking(on) {
+    picking = on;
+    pickBtn.setAttribute("aria-pressed", String(on));
+    pickBtn.textContent = on ? "Click an element · Esc cancels" : "Point at element";
+  }
+  function togglePicking() {
+    if (picking) {
+      frameEl()?.contentWindow.postMessage({ type: "web-artefacts:pick-cancel" }, "*");
+      setPicking(false);
+      return;
+    }
+    if (state.mode !== "preview") { state.mode = "preview"; update(); }
+    setPicking(true);
+    whenFrameReady((w) => w.postMessage({ type: "web-artefacts:pick" }, "*"));
+  }
+  // Esc in the viewer cancels too; the frame script handles it while the page has focus.
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && picking) togglePicking(); });
+  function showAnchor(c) {
+    const version = c.version === state.meta.latest_version ? null : c.version;
+    if (state.version !== version || state.mode !== "preview") { state.version = version; state.mode = "preview"; update(); }
+    whenFrameReady((w) => w.postMessage({ type: "web-artefacts:highlight", selector: c.anchor.selector }, "*"));
+  }
+
+  // Errors the frame script reports are shown here and sent to the API, where
+  // the agent sees them. Sent in batches, since a broken page often throws several at once.
+  let frameErrors = [];
+  let pendingErrors = [];
+  let errorsTimer;
+  function renderErrors() {
+    errorsEl.hidden = frameErrors.length === 0;
+    errorsEl.textContent = `⚠ ${frameErrors.length} ${frameErrors.length === 1 ? "error" : "errors"}`;
+    errorsEl.title = `Errors in this page – the agent sees them:\n${frameErrors.map((m) => `• ${m}`).join("\n")}`;
+  }
+  function reportError(message) {
+    frameErrors.push(message);
+    renderErrors();
+    pendingErrors.push(message);
+    const version = frameVersion;
+    clearTimeout(errorsTimer);
+    errorsTimer = setTimeout(() => {
+      const messages = pendingErrors;
+      pendingErrors = [];
+      api(`/api/artifacts/${id}/versions/${version}/errors`, { method: "POST", body: JSON.stringify({ messages }) }).catch(() => {});
+    }, 500);
+  }
+
   window.addEventListener("message", (e) => {
-    const frame = stage.querySelector("iframe");
+    const frame = frameEl();
     if (!frame || e.source !== frame.contentWindow) return;
-    const { type, key, text } = e.data ?? {};
-    if (type !== "web-artefacts:choice" || typeof text !== "string" || !text.trim()) return;
-    const choice = text.trim().slice(0, 2000);
-    const mapKey = typeof key === "string" && key ? `key:${key}` : `text:${choice}`;
-    if (!choices.has(mapKey) && choices.size >= 50) return;
-    choices.set(mapKey, choice);
-    renderChoices();
-    if (!state.panelOpen) {
-      state.panelOpen = true;
-      store.set("panelOpen", "1");
-      update();
+    const data = e.data ?? {};
+    switch (data.type) {
+      case "web-artefacts:choice": {
+        if (typeof data.text !== "string" || !data.text.trim()) return;
+        const choice = data.text.trim().slice(0, 2000);
+        const mapKey = typeof data.key === "string" && data.key ? `key:${data.key}` : `text:${choice}`;
+        if (!choices.has(mapKey) && choices.size >= 50) return;
+        choices.set(mapKey, choice);
+        renderChoices();
+        openPanel();
+        break;
+      }
+      case "web-artefacts:anchor": {
+        const { selector, text } = data.anchor ?? {};
+        if (!picking || typeof selector !== "string" || !selector) return;
+        anchor = { selector: selector.slice(0, 500), text: typeof text === "string" ? text.slice(0, 200) : "" };
+        setPicking(false);
+        renderChoices();
+        openPanel();
+        textarea.focus();
+        break;
+      }
+      case "web-artefacts:pick-cancelled":
+        setPicking(false);
+        break;
+      case "web-artefacts:highlighted":
+        if (!data.found) toast("This element is not in the version shown");
+        break;
+      case "web-artefacts:error":
+        if (typeof data.message === "string" && data.message && frameErrors.length < 20) reportError(data.message.slice(0, 500));
+        break;
     }
   });
 
@@ -311,6 +411,12 @@ async function renderViewer(id) {
     // A fresh element per load keeps the browser history free of iframe entries.
     const frame = iframe.cloneNode();
     frame.src = v.raw_url;
+    frameReady = false;
+    frameVersion = v.version;
+    frame.addEventListener("load", () => { frameReady = true; }, { once: true });
+    frameErrors = [];
+    renderErrors();
+    setPicking(false);
     stage.replaceChildren(frame);
   }
 
@@ -374,8 +480,11 @@ async function renderViewer(id) {
     state.mode === "diff" ? url.searchParams.set("mode", "diff") : url.searchParams.delete("mode");
     history.replaceState(null, "", url);
 
-    if (state.mode === "diff" && m.versions.length > 1) renderDiff();
-    else { state.mode = "preview"; loadFrame(); }
+    if (state.mode === "diff" && m.versions.length > 1) {
+      if (picking) setPicking(false);
+      renderDiff();
+    } else { state.mode = "preview"; loadFrame(); }
+    pickBtn.hidden = state.mode !== "preview";
     renderComments();
   }
 
