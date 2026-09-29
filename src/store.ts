@@ -221,7 +221,7 @@ export class Store {
       );
       if (seen) continue;
       const stored = await this.sql.first<{ n: number }>("SELECT COUNT(*) AS n FROM errors WHERE artifact_id = ? AND version = ?", id, version);
-      if (stored!.n >= MAX_ERRORS_PER_VERSION) return;
+      if (stored!.n >= MAX_ERRORS_PER_VERSION) continue; // known messages later in the batch still count
       await this.sql.run(
         "INSERT INTO errors (artifact_id, version, message, count, first_seen, last_seen) VALUES (?, ?, ?, 1, ?, ?)",
         id, version, message, now, now,

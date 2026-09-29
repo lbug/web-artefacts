@@ -25,6 +25,7 @@ const MAX_REDIRECTS = 3;
 
 /** URLs that existed once; CDN files under a fixed URL do not disappear. */
 const known = new Set<string>();
+const MAX_KNOWN = 1000;
 
 /** Status of a URL on the allowed hosts, or null when that cannot be told. */
 async function status(url: string, fetchImpl: typeof fetch): Promise<number | null> {
@@ -71,7 +72,10 @@ export async function checkResources(html: string, fetchImpl: typeof fetch = fet
       if (!ALLOWED.has(parsed.origin)) return `Blocked by the viewer's CSP (host not allowed): ${url}`;
       if (known.has(url) || ++checks > MAX_CHECKS) return null;
       const code = await status(url, fetchImpl);
-      if (code !== null && code < 400) known.add(url);
+      if (code !== null && code < 400) {
+        if (known.size >= MAX_KNOWN) known.clear();
+        known.add(url);
+      }
       // 405 and 429 say nothing about the file itself.
       return code !== null && code >= 400 && code !== 405 && code !== 429 ? `CDN resource returned ${code}: ${url}` : null;
     }),

@@ -244,7 +244,9 @@ export function createViewerApp(cfg: Config, store: Store, bus: Bus) {
   // Comments. `after` returns only newer comments; `wait` (seconds) long-polls
   // until at least one arrives, which lets an agent block on user feedback.
   // `settle` (seconds) then keeps waiting until no new comment arrived for that
-  // long (at most 30 s), because users often write several comments in a row.
+  // long, because users often write several comments in a row. It runs until
+  // the `wait` budget is used up, but always allows one quiet period after the
+  // first comment, so a request lasts at most `wait` + `settle` seconds.
   app.get("/api/artifacts/:id/comments", async (c) => {
     const id = paramId(c);
     await store.get(id);
@@ -286,7 +288,7 @@ export function createViewerApp(cfg: Config, store: Store, bus: Bus) {
         [comments, errors] = await Promise.all([fetchNew(), fetchErrors()]);
       }
       if (comments.length > 0 && wait > 0 && settle > 0) {
-        const settleDeadline = Date.now() + MAX_SETTLE_SECONDS * 1000;
+        const settleDeadline = Math.max(deadline, Date.now() + settle * 1000);
         while (Date.now() < settleDeadline && (await nextEvent(Math.min(settle * 1000, settleDeadline - Date.now()), ["comment"])));
         [comments, errors] = await Promise.all([fetchNew(), fetchErrors()]);
       }
@@ -429,7 +431,7 @@ export function createRawApp(cfg: Config, store: Store) {
 
   // The CSP names the frame script by its full URL, so artifacts still cannot
   // load anything else from this origin.
-  const frameScriptSources = [...new Set([rawOrigin(cfg), `http://localhost:${cfg.rawPort}`])].map((o) => `${o}${FRAME_SCRIPT_PATH}`).join(" ");
+  const frameScriptSources = [...allowedHosts].map((host) => `http://${host}${FRAME_SCRIPT_PATH}`).join(" ");
   const csp = RAW_CSP.replace(/script-src ([^;]*)/, `script-src $1 ${frameScriptSources}`);
 
   app.get(FRAME_SCRIPT_PATH, async (c) => {

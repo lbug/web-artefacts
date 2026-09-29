@@ -206,6 +206,11 @@ test("browser errors are deduplicated, capped and counted for the latest version
   await report(1, Array.from({ length: 30 }, (_, i) => `error ${i}`));
   res = await (await call(`/api/artifacts/${a.id}/errors?version=1`)).json();
   assert.equal(res.errors.length, 20);
+  // At the cap, known messages in the same batch still count.
+  await report(1, ["one more new error", "Blocked"]);
+  res = await (await call(`/api/artifacts/${a.id}/errors?version=1`)).json();
+  assert.equal(res.errors.length, 20);
+  assert.equal(res.errors.find((e: { message: string }) => e.message === "Blocked").count, 3);
   assert.equal((await report(1, "not a list")).status, 400);
   assert.equal((await report(7, ["x"])).status, 404);
 
@@ -257,6 +262,22 @@ test("long-poll with settle waits for the user to pause and returns all comments
   assert.deepEqual(res.comments.map((c: { body: string }) => c.body), ["eins", "zwei"]);
   // Returns one quiet second after the last comment, not at the 5 s deadline.
   assert.ok(elapsed >= 1500 && elapsed < 3000, `elapsed ${elapsed} ms`);
+});
+
+test("the settle window exceeds the wait budget by at most one quiet period", async () => {
+  const { call } = setup();
+  const a = await (await call("/api/artifacts", { method: "POST", json: { html: "x", title: "T" } })).json();
+  const post = (body: string) => call(`/api/artifacts/${a.id}/comments`, { method: "POST", json: { body } });
+  const started = Date.now();
+  const waiting = call(`/api/artifacts/${a.id}/comments?after=0&wait=1&settle=1`).then((r) => r.json());
+  // The user keeps commenting every 0.4 s, long past the 1 s budget.
+  const timers = [200, 600, 1000, 1400, 1800, 2200, 2600].map((ms, i) => setTimeout(() => post(`c${i}`), ms));
+  const res = await waiting;
+  const elapsed = Date.now() - started;
+  timers.forEach(clearTimeout);
+  // First comment at 0.2 s: it may settle until max(1 s budget, 0.2 s + 1 s) = 1.2 s.
+  assert.ok(elapsed < 1700, `elapsed ${elapsed} ms`);
+  assert.deepEqual(res.comments.map((c: { body: string }) => c.body).slice(0, 3), ["c0", "c1", "c2"]);
 });
 
 test("long-poll marks the agent as listening while it waits", async () => {

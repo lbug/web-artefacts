@@ -347,7 +347,17 @@ async function renderViewer(id) {
   // the agent sees them. Sent in batches, since a broken page often throws several at once.
   let frameErrors = [];
   let pendingErrors = [];
+  let pendingVersion = null;
   let errorsTimer;
+  // Sends the batch now; loadFrame calls it before switching versions, so a
+  // batch never mixes errors of two versions.
+  function flushErrors() {
+    clearTimeout(errorsTimer);
+    if (pendingErrors.length === 0) return;
+    const messages = pendingErrors;
+    pendingErrors = [];
+    api(`/api/artifacts/${id}/versions/${pendingVersion}/errors`, { method: "POST", body: JSON.stringify({ messages }) }).catch(() => {});
+  }
   function renderErrors() {
     errorsEl.hidden = frameErrors.length === 0;
     errorsEl.textContent = `⚠ ${frameErrors.length} ${frameErrors.length === 1 ? "error" : "errors"}`;
@@ -357,13 +367,9 @@ async function renderViewer(id) {
     frameErrors.push(message);
     renderErrors();
     pendingErrors.push(message);
-    const version = frameVersion;
+    pendingVersion = frameVersion;
     clearTimeout(errorsTimer);
-    errorsTimer = setTimeout(() => {
-      const messages = pendingErrors;
-      pendingErrors = [];
-      api(`/api/artifacts/${id}/versions/${version}/errors`, { method: "POST", body: JSON.stringify({ messages }) }).catch(() => {});
-    }, 500);
+    errorsTimer = setTimeout(flushErrors, 500);
   }
 
   window.addEventListener("message", (e) => {
@@ -412,6 +418,7 @@ async function renderViewer(id) {
     const frame = iframe.cloneNode();
     frame.src = v.raw_url;
     frameReady = false;
+    flushErrors();
     frameVersion = v.version;
     frame.addEventListener("load", () => { frameReady = true; }, { once: true });
     frameErrors = [];

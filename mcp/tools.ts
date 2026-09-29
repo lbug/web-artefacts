@@ -310,7 +310,7 @@ export function createMcpServer(opts: { fetchApi: Fetch; cwd?: string; fallbackA
       inputSchema: z.object({
         id: idParam,
         after_comment_id: z.number().int().optional().describe("Only comments with a greater id. Default: only comments written from now on"),
-        timeout_seconds: z.number().int().min(1).max(600).optional().describe("Default 300"),
+        timeout_seconds: z.number().int().min(1).max(600).optional().describe("Default 300. Once a comment arrived, the call may run up to 5 s longer to collect the user's next comments"),
       }),
       annotations: { ...LOCAL, readOnlyHint: true },
     },
