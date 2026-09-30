@@ -4,6 +4,8 @@ Notable changes per release. `npm version` turns "Unreleased" into the new versi
 
 ## Unreleased
 
+## 0.4.0 - 2026-09-30
+
 ### Added
 - Projects: every artifact belongs to the project the agent works in (the name of its git repository, else of its working directory), detected by the stdio MCP server. Existing artifacts get a project with their next version.
 - Gallery: filter by title and project, 100 artifacts per page. Filters and page live in the URL.
