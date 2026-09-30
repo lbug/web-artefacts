@@ -64,6 +64,23 @@ test("title update with new version", async () => {
   assert.equal((await (await call(`/api/artifacts/${a.id}`)).json()).title, "Neu");
 });
 
+test("artifacts keep the first project they were published from and can be listed by project", async () => {
+  const { call } = setup();
+  const publish = async (json: Record<string, unknown>) => (await (await call("/api/artifacts", { method: "POST", json })).json()).id;
+  const a = await publish({ html: "a", title: "A", project: "shop" });
+  const b = await publish({ html: "b", title: "B", project: "blog" });
+  const c = await publish({ html: "c", title: "C" });
+
+  // A later version from another project does not move the artifact; one without a project gets it.
+  await call(`/api/artifacts/${a}/versions`, { method: "POST", json: { html: "a2", project: "blog" } });
+  await call(`/api/artifacts/${c}/versions`, { method: "POST", json: { html: "c2", project: "shop" } });
+
+  const list = await (await call("/api/artifacts")).json();
+  assert.deepEqual(Object.fromEntries(list.map((x: { id: string; project: string | null }) => [x.id, x.project])), { [a]: "shop", [b]: "blog", [c]: "shop" });
+  const shop = await (await call("/api/artifacts?project=shop")).json();
+  assert.deepEqual(shop.map((x: { id: string }) => x.id).sort(), [a, c].sort());
+});
+
 test("republishing identical html keeps the latest version", async () => {
   const { call, bus } = setup();
   const a = await (await call("/api/artifacts", { method: "POST", json: { html: "<p>same</p>", title: "T" } })).json();
@@ -327,7 +344,7 @@ test("migrations are versioned and idempotent", async () => {
   const { cfg } = setup();
   const { DatabaseSync } = await import("node:sqlite");
   const db = new DatabaseSync(join(cfg.dataDir, "artifacts.db"));
-  assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 2);
+  assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 3);
   db.close();
   openSql(cfg.dataDir); // reopening must not fail or re-run migrations
 });

@@ -93,6 +93,7 @@ const formatErrors = (errors: BrowserError[]) => errors.map((e) => `- ${e.messag
 interface ArtifactSummary {
   id: string;
   title: string;
+  project: string | null;
   latest_version: number;
   updated_at: string;
   latest_agent: string | null;
@@ -121,6 +122,7 @@ const ListSchema = z.object({
     z.object({
       id: z.string(),
       title: z.string(),
+      project: z.string().nullable(),
       latest_version: z.number().int(),
       updated_at: z.string(),
       latest_agent: z.string().nullable(),
@@ -129,13 +131,14 @@ const ListSchema = z.object({
       url: z.string(),
     }),
   ),
+  project: z.string().optional().describe("The project the list is limited to; absent when it lists all artifacts"),
   note: z.string().optional(),
 });
 
 // Every tool here only touches the local artifact service.
 const LOCAL = { openWorldHint: false } as const;
 
-export function createMcpServer(opts: { fetchApi: Fetch; cwd?: string; fallbackAgent?: string }): McpServer {
+export function createMcpServer(opts: { fetchApi: Fetch; cwd?: string; project?: string; fallbackAgent?: string }): McpServer {
   const { fetchApi } = opts;
   const server = new McpServer({ name: "web-artefacts", version: VERSION }, { instructions: SERVER_INSTRUCTIONS });
   // 2026-07-28 connections carry the client's identity per request; 2025-era
@@ -218,7 +221,7 @@ export function createMcpServer(opts: { fetchApi: Fetch; cwd?: string; fallbackA
       const res = await api<z.infer<typeof PublishedSchema> & { unchanged?: boolean }>(
         fetchApi,
         id ? `/api/artifacts/${encodeURIComponent(id)}/versions` : "/api/artifacts",
-        { method: "POST", body: JSON.stringify({ html: content, title, agent: agentName(ctx) }) },
+        { method: "POST", body: JSON.stringify({ html: content, title, agent: agentName(ctx), project: opts.project }) },
       );
       const warnings = await checking;
       const next_step = res.unchanged
@@ -235,16 +238,22 @@ export function createMcpServer(opts: { fetchApi: Fetch; cwd?: string; fallbackA
     "list_artifacts",
     {
       title: "List artifacts",
-      description: "Lists all artifacts with id, title, latest version, agent and number of open comments.",
+      description:
+        "Lists artifacts with id, title, project, latest version, agent and number of open comments, most recently updated first. By default only those of the current project (your git repository or working directory); all_projects lists every artifact.",
+      inputSchema: z.object({
+        all_projects: z.boolean().optional().describe("List the artifacts of all projects, not just the current one"),
+      }),
       outputSchema: ListSchema,
       annotations: { ...LOCAL, readOnlyHint: true },
     },
-    tool(async () => {
-      const list = await api<ArtifactSummary[]>(fetchApi, "/api/artifacts");
-      const artifacts = list.map(({ id, title, latest_version, updated_at, latest_agent, open_comments, latest_errors, url }) => ({
-        id, title, latest_version, updated_at, latest_agent, open_comments, browser_errors: latest_errors, url,
+    tool(async ({ all_projects }) => {
+      const project = all_projects ? undefined : opts.project;
+      const list = await api<ArtifactSummary[]>(fetchApi, project ? `/api/artifacts?project=${encodeURIComponent(project)}` : "/api/artifacts");
+      const artifacts = list.map(({ id, title, project, latest_version, updated_at, latest_agent, open_comments, latest_errors, url }) => ({
+        id, title, project, latest_version, updated_at, latest_agent, open_comments, browser_errors: latest_errors, url,
       }));
-      return text(JSON.stringify(artifacts, null, 2), { artifacts });
+      const empty = project && artifacts.length === 0 ? `No artifacts in project "${project}". Pass all_projects: true to list all.` : undefined;
+      return text(empty ?? JSON.stringify(artifacts, null, 2), { artifacts, ...(project ? { project } : {}), ...(empty ? { note: empty } : {}) });
     }, "none"),
   );
 

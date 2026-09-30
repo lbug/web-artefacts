@@ -1,8 +1,8 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
@@ -166,6 +166,31 @@ test("stdio MCP serves 2025-era clients too", async (t) => {
   const { id } = res.structuredContent as { id: string };
   const meta = await (await fetch(`${base}/api/artifacts/${id}`)).json();
   assert.equal(meta.versions[0].agent, "legacy-agent");
+  await client.close();
+});
+
+test("stdio MCP files artifacts under the agent's git repository and lists that project by default", async (t) => {
+  const repo = join(dataDir, "shop");
+  mkdirSync(join(repo, ".git"), { recursive: true });
+  mkdirSync(join(repo, "src"));
+  const client = new Client({ name: "repo-agent", version: "1.0.0" }, { versionNegotiation: { mode: "auto" } });
+  t.after(() => client.close());
+  await client.connect(
+    new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL("../src/cli.ts", import.meta.url)), "mcp"], env, cwd: join(repo, "src"), stderr: "pipe" }),
+  );
+  type Listed = { artifacts: Array<{ title: string; project: string | null }>; project?: string; note?: string };
+  const list = async (args = {}) => (await client.callTool({ name: "list_artifacts", arguments: args })).structuredContent as Listed;
+
+  const empty = await list();
+  assert.equal(empty.project, "shop");
+  assert.deepEqual(empty.artifacts, []);
+  assert.match(empty.note ?? "", /all_projects: true/);
+
+  await client.callTool({ name: "publish_artifact", arguments: { html: "<p>cart</p>", title: "Cart" } });
+  assert.deepEqual((await list()).artifacts.map((a) => [a.title, a.project]), [["Cart", "shop"]]);
+  const all = await list({ all_projects: true });
+  assert.equal(all.project, undefined);
+  assert.ok(all.artifacts.some((a) => a.title === "Demo" && a.project === basename(dataDir)));
   await client.close();
 });
 

@@ -201,20 +201,26 @@ export function createViewerApp(cfg: Config, store: Store, bus: Bus) {
 
   const withUrls = <T extends { id: string }>(a: T) => ({ ...a, url: `${origin}/a/${a.id}` });
 
+  // `project` limits the list to one project.
   app.get("/api/artifacts", async (c) =>
-    c.json((await store.list()).map((a) => ({ ...withUrls(a), raw_url: `${rawOrigin(cfg)}/raw/${a.id}/${a.latest_version}` }))),
+    c.json((await store.list({ project: c.req.query("project") })).map((a) => ({ ...withUrls(a), raw_url: `${rawOrigin(cfg)}/raw/${a.id}/${a.latest_version}` }))),
   );
 
+  const publishInput = (body: Record<string, unknown>) => ({
+    html: requireHtml(body),
+    title: optString(body.title),
+    agent: optString(body.agent, 80),
+    project: optString(body.project, 120),
+  });
+
   app.post("/api/artifacts", async (c) => {
-    const body = await jsonBody(c);
-    const res = await store.publish({ html: requireHtml(body), title: optString(body.title), agent: optString(body.agent, 80) });
+    const res = await store.publish(publishInput(await jsonBody(c)));
     return c.json(withUrls(res), 201);
   });
 
   app.post("/api/artifacts/:id/versions", async (c) => {
     const id = paramId(c);
-    const body = await jsonBody(c);
-    const res = await store.publish({ id, html: requireHtml(body), title: optString(body.title), agent: optString(body.agent, 80) });
+    const res = await store.publish({ id, ...publishInput(await jsonBody(c)) });
     if (res.unchanged) return c.json(withUrls(res), 200);
     bus.emit(id, { type: "version", version: res.version });
     return c.json(withUrls(res), 201);

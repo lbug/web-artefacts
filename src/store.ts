@@ -18,6 +18,8 @@ export interface Blobs {
 export interface ArtifactRow {
   id: string;
   title: string;
+  /** Name of the agent's git repository or working directory; null if unknown. */
+  project: string | null;
   created_at: string;
   updated_at: string;
   latest_version: number;
@@ -95,7 +97,7 @@ async function sha256Hex(text: string): Promise<string> {
 const blobKey = (id: string, version: number) => `artifacts/${id}/${version}.html`;
 
 const ARTIFACT_SELECT = `
-  SELECT a.id, a.title, a.created_at, a.updated_at,
+  SELECT a.id, a.title, a.project, a.created_at, a.updated_at,
          (SELECT MAX(version) FROM versions v WHERE v.artifact_id = a.id) AS latest_version,
          (SELECT COUNT(*) FROM versions v WHERE v.artifact_id = a.id) AS version_count,
          (SELECT agent FROM versions v WHERE v.artifact_id = a.id ORDER BY version DESC LIMIT 1) AS latest_agent,
@@ -114,7 +116,7 @@ export class Store {
   }
 
   /** Publishes a new artifact (id omitted) or a new version of an existing one. */
-  async publish(input: { id?: string; title?: string; html: string; agent?: string | null }) {
+  async publish(input: { id?: string; title?: string; html: string; agent?: string | null; project?: string | null }) {
     const now = new Date().toISOString();
     let id = input.id;
     let title = input.title?.trim();
@@ -123,8 +125,8 @@ export class Store {
       id = newId();
       title ||= "Untitled";
       await this.sql.run(
-        "INSERT INTO artifacts (id, title, created_at, updated_at, version_counter) VALUES (?, ?, ?, ?, 0)",
-        id, title, now, now,
+        "INSERT INTO artifacts (id, title, project, created_at, updated_at, version_counter) VALUES (?, ?, ?, ?, ?, 0)",
+        id, title, input.project ?? null, now, now,
       );
     }
 
@@ -138,11 +140,12 @@ export class Store {
     }
 
     // A single UPDATE ... RETURNING is atomic in SQLite and D1, so two agents
-    // publishing at once can never receive the same version number.
+    // publishing at once can never receive the same version number. The first
+    // known project sticks, so artifacts from before projects get one later.
     const reserved = await this.sql.first<{ version: number; title: string }>(
-      `UPDATE artifacts SET version_counter = version_counter + 1, updated_at = ?, title = COALESCE(?, title)
+      `UPDATE artifacts SET version_counter = version_counter + 1, updated_at = ?, title = COALESCE(?, title), project = COALESCE(project, ?)
        WHERE id = ? RETURNING version_counter AS version, title`,
-      now, title || null, id,
+      now, title || null, input.project ?? null, id,
     );
     if (!reserved) throw new NotFound(`Artifact ${id} not found`);
 
@@ -155,11 +158,13 @@ export class Store {
     return { id, version: reserved.version, title: reserved.title, unchanged: false };
   }
 
-  list(limit = 100): Promise<ArtifactRow[]> {
+  list(opts: { limit?: number; project?: string } = {}): Promise<ArtifactRow[]> {
     // Skip artifacts whose first version never finished writing.
+    const params: SqlValue[] = opts.project === undefined ? [] : [opts.project];
     return this.sql.all<ArtifactRow>(
-      `${ARTIFACT_SELECT} WHERE EXISTS (SELECT 1 FROM versions v WHERE v.artifact_id = a.id) ORDER BY a.updated_at DESC LIMIT ?`,
-      limit,
+      `${ARTIFACT_SELECT} WHERE EXISTS (SELECT 1 FROM versions v WHERE v.artifact_id = a.id)
+       ${opts.project === undefined ? "" : "AND a.project = ?"} ORDER BY a.updated_at DESC LIMIT ?`,
+      ...params, opts.limit ?? 100,
     );
   }
 

@@ -68,15 +68,28 @@ function thumbFrame(src) {
   });
 }
 
+// Project filter values: all projects, artifacts without a project, or one project.
+const ALL = "all", NONE = "none", projectKey = (p) => (p == null ? NONE : `p:${p}`);
+
 async function renderIndex() {
   document.title = "Artifacts";
+  // Filters live in the URL, so they survive going to an artifact and back.
+  const params = new URLSearchParams(location.search);
+  const filter = {
+    q: params.get("q") ?? "",
+    project: params.has("project") ? projectKey(params.get("project") || null) : ALL,
+  };
+  const search = h("input", { type: "search", class: "btn search", placeholder: "Filter by title", value: filter.q, "aria-label": "Filter by title" });
+  const projects = h("select", { class: "btn", "aria-label": "Project" });
+  const toolbar = h("div", { class: "toolbar", hidden: true }, search, projects);
   const list = h("div", { class: "gallery" });
+  const noMatch = h("div", { class: "empty", hidden: true }, h("p", { class: "muted" }, "No artifacts match the filter."));
   root.replaceChildren(h("main", { class: "index" },
     h("h1", {}, "Artifacts"),
     h("p", { class: "sub muted" }, "Pages published by your coding agents. New versions show up live."),
-    list));
+    toolbar, list, noMatch));
 
-  const cards = new Map(); // id -> { el, version, thumb, meta, badge }
+  const cards = new Map(); // id -> { el, version, thumb, meta, badge, data }
 
   function card(a) {
     const thumb = h("div", { class: "thumb" }, thumbFrame(a.raw_url));
@@ -88,17 +101,57 @@ async function renderIndex() {
     return { el, thumb, meta, badge, title, version: a.latest_version };
   }
 
+  // Hides non-matching cards instead of removing them: re-adding an iframe reloads it.
+  function applyFilter() {
+    const q = filter.q.trim().toLowerCase();
+    let shown = 0;
+    for (const c of cards.values()) {
+      const match = (filter.project === ALL || projectKey(c.data.project) === filter.project) && c.data.title.toLowerCase().includes(q);
+      c.el.hidden = !match;
+      if (match) shown++;
+    }
+    noMatch.hidden = cards.size === 0 || shown > 0;
+  }
+
+  function updateUrl() {
+    const url = new URL(location.href);
+    filter.q ? url.searchParams.set("q", filter.q) : url.searchParams.delete("q");
+    if (filter.project === ALL) url.searchParams.delete("project");
+    else url.searchParams.set("project", filter.project === NONE ? "" : filter.project.slice(2));
+    history.replaceState(null, "", url);
+  }
+
+  search.addEventListener("input", () => { filter.q = search.value; applyFilter(); updateUrl(); });
+  projects.addEventListener("change", () => { filter.project = projects.value; applyFilter(); updateUrl(); });
+
+  // Rebuilds the project options only when the set of projects changed, so an open dropdown is left alone.
+  function renderProjects(items) {
+    const names = [...new Set(items.map((a) => a.project).filter((p) => p != null))].sort((a, b) => a.localeCompare(b));
+    const options = [[ALL, "All projects"], ...names.map((p) => [projectKey(p), p])];
+    if (items.some((a) => a.project == null)) options.push([NONE, "No project"]);
+    // Keep a selected project from the URL visible even when it has no artifacts (any more).
+    if (!options.some(([key]) => key === filter.project)) options.push([filter.project, filter.project === NONE ? "No project" : filter.project.slice(2)]);
+    const signature = JSON.stringify(options);
+    if (projects.dataset.signature === signature) return;
+    projects.dataset.signature = signature;
+    projects.replaceChildren(...options.map(([key, label]) => h("option", { value: key }, label)));
+    projects.value = filter.project;
+  }
+
   async function refresh() {
     let items;
     try { items = await api("/api/artifacts"); } catch (e) { list.replaceChildren(h("div", { class: "error" }, e.message)); return; }
+    toolbar.hidden = items.length === 0;
     if (items.length === 0) {
       cards.clear();
+      noMatch.hidden = true;
       list.replaceChildren(h("div", { class: "empty" },
         h("p", {}, "No artifacts yet."),
         h("p", { class: "muted" }, "Ask your agent to publish a page with ", h("code", {}, "publish_artifact"), ".")));
       return;
     }
     list.querySelector(".empty, .error")?.remove();
+    renderProjects(items);
 
     const seen = new Set();
     items.forEach((a, i) => {
@@ -109,10 +162,12 @@ async function renderIndex() {
         c.version = a.latest_version;
         c.thumb.firstElementChild.src = a.raw_url;
       }
+      c.data = a;
       c.title.textContent = a.title;
       c.title.title = a.title;
       c.meta.replaceChildren(
         h("span", { class: "ver" }, `v${a.latest_version}`),
+        a.project ? ` · ${a.project}` : "",
         a.latest_agent ? ` · ${a.latest_agent}` : "",
         h("span", { title: fullDate(a.updated_at) }, ` · ${ago(a.updated_at)}`));
       c.badge.textContent = a.open_comments;
@@ -121,6 +176,7 @@ async function renderIndex() {
       if (list.children[i] !== c.el) list.insertBefore(c.el, list.children[i] ?? null);
     });
     for (const [id, c] of cards) if (!seen.has(id)) { thumbResize.unobserve(c.thumb); c.el.remove(); cards.delete(id); }
+    applyFilter();
   }
   await refresh();
   setInterval(() => document.visibilityState === "visible" && refresh(), 5000);
