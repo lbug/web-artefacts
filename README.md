@@ -104,9 +104,10 @@ To point an agent at the source during development (Node ≥ 22.18):
 
 Release:
 
-1. `npm version patch|minor|major`, then `git push --follow-tags`.
-2. `.github/workflows/release.yml` tests, builds and stages the version via npm trusted publishing. The trusted publisher may only stage, so nothing goes live without you.
-3. Approve it with 2FA on the package page on npmjs.com. Alternatively run `npm stage approve <id>` (needs npm ≥ 11.15.0 and `npm login`); the id is in the workflow log (`staged with id …`).
+1. Describe the changes under "## Unreleased" in `CHANGELOG.md` (can happen along the way, with each change).
+2. `npm version patch|minor|major`, then `git push --follow-tags`. `npm version` turns "Unreleased" into the new version's section, dated today, and commits it with the version bump; it refuses to run while "Unreleased" is empty.
+3. `.github/workflows/release.yml` tests, builds and stages the version via npm trusted publishing, then creates the GitHub release with the version's changelog section as notes. The trusted publisher may only stage, so nothing goes live on npm without you.
+4. Approve it with 2FA on the package page on npmjs.com. Alternatively run `npm stage approve <id>` (needs npm ≥ 11.15.0 and `npm login`); the id is in the workflow log (`staged with id …`).
 
 The very first version is published once by hand with `npm publish --access public`.
 

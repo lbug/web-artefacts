@@ -39,6 +39,7 @@
     "mcp": "node src/cli.ts mcp",
     "build": "node build.mjs",
     "prepack": "npm run build",
+    "version": "node changelog.mjs release && git add CHANGELOG.md",
     "test": "node --disable-warning=ExperimentalWarning --test test/*.test.ts",
     "typecheck": "tsc -p ."
   },
