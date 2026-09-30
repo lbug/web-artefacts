@@ -70,6 +70,7 @@ function thumbFrame(src) {
 
 // Project filter values: all projects, artifacts without a project, or one project.
 const ALL = "all", NONE = "none", projectKey = (p) => (p == null ? NONE : `p:${p}`);
+const PAGE_SIZE = 100;
 
 async function renderIndex() {
   document.title = "Artifacts";
@@ -78,18 +79,26 @@ async function renderIndex() {
   const filter = {
     q: params.get("q") ?? "",
     project: params.has("project") ? projectKey(params.get("project") || null) : ALL,
+    page: Math.max(1, Math.floor(Number(params.get("page"))) || 1),
   };
   const search = h("input", { type: "search", class: "btn search", placeholder: "Filter by title", value: filter.q, "aria-label": "Filter by title" });
   const projects = h("select", { class: "btn", "aria-label": "Project" });
   const toolbar = h("div", { class: "toolbar", hidden: true }, search, projects);
   const list = h("div", { class: "gallery" });
   const noMatch = h("div", { class: "empty", hidden: true }, h("p", { class: "muted" }, "No artifacts match the filter."));
+  // Built once and only updated, so the 5 s refresh never swaps a button out from under a click.
+  const go = (step) => { filter.page += step; render(); updateUrl(); window.scrollTo(0, 0); };
+  const prev = h("button", { class: "btn", onclick: () => go(-1) }, "‹ Previous");
+  const next = h("button", { class: "btn", onclick: () => go(1) }, "Next ›");
+  const range = h("span", { class: "muted" });
+  const pager = h("nav", { class: "pager", hidden: true, "aria-label": "Pages" }, prev, range, next);
   root.replaceChildren(h("main", { class: "index" },
     h("h1", {}, "Artifacts"),
     h("p", { class: "sub muted" }, "Pages published by your coding agents. New versions show up live."),
-    toolbar, list, noMatch));
+    toolbar, list, noMatch, pager));
 
-  const cards = new Map(); // id -> { el, version, thumb, meta, badge, data }
+  let items = []; // all artifacts, most recently updated first
+  const cards = new Map(); // id -> { el, version, thumb, meta, badge, title }, for the current page only
 
   function card(a) {
     const thumb = h("div", { class: "thumb" }, thumbFrame(a.raw_url));
@@ -101,16 +110,44 @@ async function renderIndex() {
     return { el, thumb, meta, badge, title, version: a.latest_version };
   }
 
-  // Hides non-matching cards instead of removing them: re-adding an iframe reloads it.
-  function applyFilter() {
+  // Filters all artifacts and shows one page of the matches. Only that page
+  // has cards, so thousands of artifacts do not mean thousands of iframes.
+  function render() {
     const q = filter.q.trim().toLowerCase();
-    let shown = 0;
-    for (const c of cards.values()) {
-      const match = (filter.project === ALL || projectKey(c.data.project) === filter.project) && c.data.title.toLowerCase().includes(q);
-      c.el.hidden = !match;
-      if (match) shown++;
-    }
-    noMatch.hidden = cards.size === 0 || shown > 0;
+    const found = items.filter((a) => (filter.project === ALL || projectKey(a.project) === filter.project) && a.title.toLowerCase().includes(q));
+    const pages = Math.max(1, Math.ceil(found.length / PAGE_SIZE));
+    filter.page = Math.min(filter.page, pages);
+    const shown = found.slice((filter.page - 1) * PAGE_SIZE, filter.page * PAGE_SIZE);
+
+    const seen = new Set();
+    shown.forEach((a, i) => {
+      seen.add(a.id);
+      let c = cards.get(a.id);
+      if (!c) cards.set(a.id, (c = card(a)));
+      else if (c.version !== a.latest_version) {
+        c.version = a.latest_version;
+        c.thumb.firstElementChild.src = a.raw_url;
+      }
+      c.title.textContent = a.title;
+      c.title.title = a.title;
+      c.meta.replaceChildren(
+        h("span", { class: "ver" }, `v${a.latest_version}`),
+        a.project ? ` · ${a.project}` : "",
+        a.latest_agent ? ` · ${a.latest_agent}` : "",
+        h("span", { title: fullDate(a.updated_at) }, ` · ${ago(a.updated_at)}`));
+      c.badge.textContent = a.open_comments;
+      c.badge.hidden = !(a.open_comments > 0);
+      // Move only cards that are out of place: moving an iframe reloads it.
+      if (list.children[i] !== c.el) list.insertBefore(c.el, list.children[i] ?? null);
+    });
+    for (const [id, c] of cards) if (!seen.has(id)) { thumbResize.unobserve(c.thumb); c.el.remove(); cards.delete(id); }
+
+    noMatch.hidden = items.length === 0 || found.length > 0;
+    pager.hidden = pages === 1;
+    prev.disabled = filter.page === 1;
+    next.disabled = filter.page === pages;
+    const start = (filter.page - 1) * PAGE_SIZE;
+    range.textContent = `${start + 1}–${start + shown.length} of ${found.length}`;
   }
 
   function updateUrl() {
@@ -118,11 +155,13 @@ async function renderIndex() {
     filter.q ? url.searchParams.set("q", filter.q) : url.searchParams.delete("q");
     if (filter.project === ALL) url.searchParams.delete("project");
     else url.searchParams.set("project", filter.project === NONE ? "" : filter.project.slice(2));
+    filter.page > 1 ? url.searchParams.set("page", filter.page) : url.searchParams.delete("page");
     history.replaceState(null, "", url);
   }
 
-  search.addEventListener("input", () => { filter.q = search.value; applyFilter(); updateUrl(); });
-  projects.addEventListener("change", () => { filter.project = projects.value; applyFilter(); updateUrl(); });
+  // A new filter starts on the first page.
+  search.addEventListener("input", () => { filter.q = search.value; filter.page = 1; render(); updateUrl(); });
+  projects.addEventListener("change", () => { filter.project = projects.value; filter.page = 1; render(); updateUrl(); });
 
   // Rebuilds the project options only when the set of projects changed, so an open dropdown is left alone.
   function renderProjects(items) {
@@ -139,12 +178,12 @@ async function renderIndex() {
   }
 
   async function refresh() {
-    let items;
     try { items = await api("/api/artifacts"); } catch (e) { list.replaceChildren(h("div", { class: "error" }, e.message)); return; }
     toolbar.hidden = items.length === 0;
     if (items.length === 0) {
       cards.clear();
       noMatch.hidden = true;
+      pager.hidden = true;
       list.replaceChildren(h("div", { class: "empty" },
         h("p", {}, "No artifacts yet."),
         h("p", { class: "muted" }, "Ask your agent to publish a page with ", h("code", {}, "publish_artifact"), ".")));
@@ -152,31 +191,7 @@ async function renderIndex() {
     }
     list.querySelector(".empty, .error")?.remove();
     renderProjects(items);
-
-    const seen = new Set();
-    items.forEach((a, i) => {
-      seen.add(a.id);
-      let c = cards.get(a.id);
-      if (!c) cards.set(a.id, (c = card(a)));
-      else if (c.version !== a.latest_version) {
-        c.version = a.latest_version;
-        c.thumb.firstElementChild.src = a.raw_url;
-      }
-      c.data = a;
-      c.title.textContent = a.title;
-      c.title.title = a.title;
-      c.meta.replaceChildren(
-        h("span", { class: "ver" }, `v${a.latest_version}`),
-        a.project ? ` · ${a.project}` : "",
-        a.latest_agent ? ` · ${a.latest_agent}` : "",
-        h("span", { title: fullDate(a.updated_at) }, ` · ${ago(a.updated_at)}`));
-      c.badge.textContent = a.open_comments;
-      c.badge.hidden = !(a.open_comments > 0);
-      // Move only cards that are out of place: moving an iframe reloads it.
-      if (list.children[i] !== c.el) list.insertBefore(c.el, list.children[i] ?? null);
-    });
-    for (const [id, c] of cards) if (!seen.has(id)) { thumbResize.unobserve(c.thumb); c.el.remove(); cards.delete(id); }
-    applyFilter();
+    render();
   }
   await refresh();
   setInterval(() => document.visibilityState === "visible" && refresh(), 5000);

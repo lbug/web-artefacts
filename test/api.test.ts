@@ -81,6 +81,15 @@ test("artifacts keep the first project they were published from and can be liste
   assert.deepEqual(shop.map((x: { id: string }) => x.id).sort(), [a, c].sort());
 });
 
+test("the list has no limit unless one is asked for", async () => {
+  const { call } = setup();
+  for (let i = 0; i < 120; i++) await call("/api/artifacts", { method: "POST", json: { html: `<p>${i}</p>`, title: `T${i}` } });
+  assert.equal((await (await call("/api/artifacts")).json()).length, 120);
+  const latest = await (await call("/api/artifacts?limit=5")).json();
+  assert.deepEqual(latest.map((x: { title: string }) => x.title), ["T119", "T118", "T117", "T116", "T115"]);
+  assert.equal((await (await call("/api/artifacts?limit=abc")).json()).length, 120);
+});
+
 test("republishing identical html keeps the latest version", async () => {
   const { call, bus } = setup();
   const a = await (await call("/api/artifacts", { method: "POST", json: { html: "<p>same</p>", title: "T" } })).json();

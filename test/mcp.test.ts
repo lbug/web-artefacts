@@ -191,6 +191,16 @@ test("stdio MCP files artifacts under the agent's git repository and lists that 
   const all = await list({ all_projects: true });
   assert.equal(all.project, undefined);
   assert.ok(all.artifacts.some((a) => a.title === "Demo" && a.project === basename(dataDir)));
+
+  // The list is cut off to protect the agent's context, and says so.
+  for (let i = 0; i < 100; i++) {
+    await fetch(`${base}/api/artifacts`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ html: `<p>${i}</p>`, title: `Bulk ${i}`, project: "shop" }) });
+  }
+  const long = await client.callTool({ name: "list_artifacts", arguments: {} });
+  assert.equal((long.structuredContent as Listed).artifacts.length, 100);
+  assert.match((long.structuredContent as Listed).note ?? "", /Only the 100 most recently updated/);
+  assert.match(textOf(long), /Only the 100 most recently updated/);
+
   await client.close();
 });
 

@@ -41,6 +41,9 @@ const SETTLE_SECONDS = 5;
 /** read_artifact returns at most this much source, to protect the agent's context. */
 const MAX_READ_CHARS = 200_000;
 
+/** list_artifacts returns at most this many artifacts, to protect the agent's context. */
+const MAX_LIST = 100;
+
 type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
   structuredContent?: Record<string, unknown>;
@@ -239,7 +242,7 @@ export function createMcpServer(opts: { fetchApi: Fetch; cwd?: string; project?:
     {
       title: "List artifacts",
       description:
-        "Lists artifacts with id, title, project, latest version, agent and number of open comments, most recently updated first. By default only those of the current project (your git repository or working directory); all_projects lists every artifact.",
+        `Lists artifacts with id, title, project, latest version, agent and number of open comments, the ${MAX_LIST} most recently updated first. By default only those of the current project (your git repository or working directory); all_projects lists those of every project.`,
       inputSchema: z.object({
         all_projects: z.boolean().optional().describe("List the artifacts of all projects, not just the current one"),
       }),
@@ -248,12 +251,18 @@ export function createMcpServer(opts: { fetchApi: Fetch; cwd?: string; project?:
     },
     tool(async ({ all_projects }) => {
       const project = all_projects ? undefined : opts.project;
-      const list = await api<ArtifactSummary[]>(fetchApi, project ? `/api/artifacts?project=${encodeURIComponent(project)}` : "/api/artifacts");
-      const artifacts = list.map(({ id, title, project, latest_version, updated_at, latest_agent, open_comments, latest_errors, url }) => ({
+      // One more than shown tells whether the list was cut off.
+      const query = `limit=${MAX_LIST + 1}${project ? `&project=${encodeURIComponent(project)}` : ""}`;
+      const list = await api<ArtifactSummary[]>(fetchApi, `/api/artifacts?${query}`);
+      const artifacts = list.slice(0, MAX_LIST).map(({ id, title, project, latest_version, updated_at, latest_agent, open_comments, latest_errors, url }) => ({
         id, title, project, latest_version, updated_at, latest_agent, open_comments, browser_errors: latest_errors, url,
       }));
-      const empty = project && artifacts.length === 0 ? `No artifacts in project "${project}". Pass all_projects: true to list all.` : undefined;
-      return text(empty ?? JSON.stringify(artifacts, null, 2), { artifacts, ...(project ? { project } : {}), ...(empty ? { note: empty } : {}) });
+      const note =
+        project && artifacts.length === 0 ? `No artifacts in project "${project}". Pass all_projects: true to list all.`
+        : list.length > MAX_LIST ? `Only the ${MAX_LIST} most recently updated artifacts are listed. For an older one, ask the user for its URL (the viewer can copy a reference for you).`
+        : undefined;
+      const listed = artifacts.length ? JSON.stringify(artifacts, null, 2) : "";
+      return text([listed, note].filter(Boolean).join("\n\n") || "[]", { artifacts, ...(project ? { project } : {}), ...(note ? { note } : {}) });
     }, "none"),
   );
 

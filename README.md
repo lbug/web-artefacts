@@ -58,7 +58,7 @@ Every artifact page loads a small script from the raw origin first (`/_wa/frame.
 | Tool | Purpose |
 |---|---|
 | `publish_artifact(path \| html, title, id?)` | Without `id` a new artifact, with `id` a new version of the same URL. Identical HTML and title return the existing version instead of creating a new one. Warns about missing CDN files and blocked hosts. `path` is preferred: the agent edits its file and a revision costs only the edit |
-| `list_artifacts(all_projects?)` | Artifacts of the current project (the agent's git repository or working directory), or of all projects, including open comment and browser error counts |
+| `list_artifacts(all_projects?)` | The 100 most recently updated artifacts of the current project (the agent's git repository or working directory), or of all projects, including open comment and browser error counts |
 | `read_artifact(id, version?)` | HTML source of a version, plus the browser errors reported for it |
 | `read_comments(id, include_resolved?)` | Comments (default: open ones only), with the element each one points at |
 | `wait_for_comments(id, timeout_seconds?)` | Waits until you comment in the viewer (default 300 s, max 600 s), then until you pause for 5 s, and returns all new comments. Returns early when the page reports browser errors |

@@ -158,13 +158,14 @@ export class Store {
     return { id, version: reserved.version, title: reserved.title, unchanged: false };
   }
 
+  /** Most recently updated first; all of them unless `limit` is given. */
   list(opts: { limit?: number; project?: string } = {}): Promise<ArtifactRow[]> {
     // Skip artifacts whose first version never finished writing.
     const params: SqlValue[] = opts.project === undefined ? [] : [opts.project];
     return this.sql.all<ArtifactRow>(
       `${ARTIFACT_SELECT} WHERE EXISTS (SELECT 1 FROM versions v WHERE v.artifact_id = a.id)
-       ${opts.project === undefined ? "" : "AND a.project = ?"} ORDER BY a.updated_at DESC LIMIT ?`,
-      ...params, opts.limit ?? 100,
+       ${opts.project === undefined ? "" : "AND a.project = ?"} ORDER BY a.updated_at DESC, a.rowid DESC LIMIT ?`,
+      ...params, opts.limit ?? -1, // LIMIT -1: no limit; rowid keeps the order stable for equal timestamps
     );
   }
 

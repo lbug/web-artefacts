@@ -201,10 +201,12 @@ export function createViewerApp(cfg: Config, store: Store, bus: Bus) {
 
   const withUrls = <T extends { id: string }>(a: T) => ({ ...a, url: `${origin}/a/${a.id}` });
 
-  // `project` limits the list to one project.
-  app.get("/api/artifacts", async (c) =>
-    c.json((await store.list({ project: c.req.query("project") })).map((a) => ({ ...withUrls(a), raw_url: `${rawOrigin(cfg)}/raw/${a.id}/${a.latest_version}` }))),
-  );
+  // `project` limits the list to one project, `limit` to the most recently updated artifacts.
+  app.get("/api/artifacts", async (c) => {
+    const limit = Number(c.req.query("limit"));
+    const list = await store.list({ project: c.req.query("project"), limit: Number.isInteger(limit) && limit > 0 ? limit : undefined });
+    return c.json(list.map((a) => ({ ...withUrls(a), raw_url: `${rawOrigin(cfg)}/raw/${a.id}/${a.latest_version}` })));
+  });
 
   const publishInput = (body: Record<string, unknown>) => ({
     html: requireHtml(body),
