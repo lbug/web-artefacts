@@ -45,7 +45,9 @@ In the feedback loop, the comment panel shows whether the agent is currently wai
 
 **Resource checks on publish:** before anyone looks at a page, `publish_artifact` checks its external resources. Files on the allowed CDNs get a `HEAD` request (redirects are followed only within those hosts), so a guessed library version that does not exist shows up as "CDN resource returned 404". URLs on any other host are reported as blocked by the CSP, without a request. The warnings come with the tool result; publishing still succeeds.
 
-**Picking up an artifact in another session:** click "⧉ Copy for agent" in the viewer and paste the reference into the session. The id is also the last path segment of every viewer URL (`/a/<id>`).
+**Picking up an artifact in another session:** click "⧉ Copy for agent" in the viewer and paste the reference into the session. The id is also the last path segment of every viewer URL (`/a/<id>`). Or just describe it ("the architecture diagram from last week"): the agent finds it with `search_artifacts`.
+
+**Projects:** every artifact belongs to the project the agent works in: the name of its git repository, else of its working directory. Agents over HTTP, or started in the home or root directory, publish without a project. The gallery filters by project and title, 100 artifacts per page; `list_artifacts` and `search_artifacts` stay within the agent's current project unless asked for all.
 
 **Choices from the page:** artifact code can call `parent.postMessage({ type: "web-artefacts:choice", key: "draft", text: "Draft B" }, "*")`. The viewer shows each choice as a removable chip next to the comment box and sends all of them with the user's next comment; nothing is sent without the user. A choice with the same `key` replaces the previous one, choices without a key add up.
 
@@ -59,6 +61,7 @@ Every artifact page loads a small script from the raw origin first (`/_wa/frame.
 |---|---|
 | `publish_artifact(path \| html, title, id?)` | Without `id` a new artifact, with `id` a new version of the same URL. Identical HTML and title return the existing version instead of creating a new one. Warns about missing CDN files and blocked hosts. `path` is preferred: the agent edits its file and a revision costs only the edit |
 | `list_artifacts(all_projects?)` | The 100 most recently updated artifacts of the current project (the agent's git repository or working directory), or of all projects, including open comment and browser error counts |
+| `search_artifacts(query, all_projects?)` | Full-text search (BM25) over titles and visible page text, also inside longer words; the 10 best matches with a snippet |
 | `read_artifact(id, version?)` | HTML source of a version, plus the browser errors reported for it |
 | `read_comments(id, include_resolved?)` | Comments (default: open ones only), with the element each one points at |
 | `wait_for_comments(id, timeout_seconds?)` | Waits until you comment in the viewer (default 300 s, max 600 s), then until you pause for 5 s, and returns all new comments. Returns early when the page reports browser errors |

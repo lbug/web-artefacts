@@ -31,7 +31,7 @@ Letting the user answer with clicks: when you ask for choices or values (pick a 
 Rules:
 - After EVERY publish – including new versions – state the URL and the version number in your reply.
 - Always publish revisions with the same id: the URL stays the same and open viewers reload live.
-- When the user refers to an artifact (URL, title or a reference copied from the viewer): the id is the last path segment of the URL (…/a/<id>); otherwise find it by title with list_artifacts. Then read_comments first.
+- When the user refers to an artifact (URL, title or a reference copied from the viewer): the id is the last path segment of the URL (…/a/<id>); otherwise find it with search_artifacts (words from its title or content). Then read_comments first.
 - Tool results may end with a note about open comments. Address it before you continue working on that artifact.
 - Talk to the user in their language; the viewer is language-neutral.`;
 
@@ -43,6 +43,9 @@ const MAX_READ_CHARS = 200_000;
 
 /** list_artifacts returns at most this many artifacts, to protect the agent's context. */
 const MAX_LIST = 100;
+
+/** search_artifacts returns at most this many hits. */
+const MAX_HITS = 10;
 
 type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
@@ -135,6 +138,21 @@ const ListSchema = z.object({
     }),
   ),
   project: z.string().optional().describe("The project the list is limited to; absent when it lists all artifacts"),
+  note: z.string().optional(),
+});
+
+const SearchSchema = z.object({
+  hits: z.array(
+    z.object({
+      id: z.string(),
+      title: z.string(),
+      project: z.string().nullable(),
+      updated_at: z.string(),
+      url: z.string(),
+      snippet: z.string().describe("Text around the matches, which are marked «like this»"),
+    }),
+  ),
+  project: z.string().optional().describe("The project the search is limited to; absent when it searched all artifacts"),
   note: z.string().optional(),
 });
 
@@ -259,10 +277,35 @@ export function createMcpServer(opts: { fetchApi: Fetch; cwd?: string; project?:
       }));
       const note =
         project && artifacts.length === 0 ? `No artifacts in project "${project}". Pass all_projects: true to list all.`
-        : list.length > MAX_LIST ? `Only the ${MAX_LIST} most recently updated artifacts are listed. For an older one, ask the user for its URL (the viewer can copy a reference for you).`
+        : list.length > MAX_LIST ? `Only the ${MAX_LIST} most recently updated artifacts are listed. Find older ones with search_artifacts.`
         : undefined;
       const listed = artifacts.length ? JSON.stringify(artifacts, null, 2) : "";
       return text([listed, note].filter(Boolean).join("\n\n") || "[]", { artifacts, ...(project ? { project } : {}), ...(note ? { note } : {}) });
+    }, "none"),
+  );
+
+  server.registerTool(
+    "search_artifacts",
+    {
+      title: "Search artifacts",
+      description: `Full-text search over the titles and visible page text of artifacts; returns the ${MAX_HITS} best matches with a snippet. Every term must match, also inside longer words ("filter" finds "Projektfilter"); terms need at least 3 characters. By default only the current project (your git repository or working directory); all_projects searches every project. Prefer it over list_artifacts to find an artifact the user describes.`,
+      inputSchema: z.object({
+        query: z.string().describe("Words from the artifact's title or content, e.g. \"architecture diagram\""),
+        all_projects: z.boolean().optional().describe("Search the artifacts of all projects, not just the current one"),
+      }),
+      outputSchema: SearchSchema,
+      annotations: { ...LOCAL, readOnlyHint: true },
+    },
+    tool(async ({ query, all_projects }) => {
+      const project = all_projects ? undefined : opts.project;
+      const params = new URLSearchParams({ q: query, limit: String(MAX_HITS) });
+      if (project) params.set("project", project);
+      const found = await api<Array<z.infer<typeof SearchSchema>["hits"][number]>>(fetchApi, `/api/search?${params}`);
+      const hits = found.map(({ id, title, project, updated_at, url, snippet }) => ({ id, title, project, updated_at, url, snippet }));
+      const note = hits.length === 0
+        ? `No artifacts match "${query}"${project ? ` in project "${project}". Pass all_projects: true to search all projects, or` : "."} Try fewer or other words.`
+        : undefined;
+      return text(note ?? JSON.stringify(hits, null, 2), { hits, ...(project ? { project } : {}), ...(note ? { note } : {}) });
     }, "none"),
   );
 

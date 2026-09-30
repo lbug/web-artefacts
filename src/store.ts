@@ -65,8 +65,44 @@ export interface ErrorRow {
   last_seen: string;
 }
 
+export interface SearchHit {
+  id: string;
+  title: string;
+  project: string | null;
+  updated_at: string;
+  /** Text around the matches, which are marked «like this». */
+  snippet: string;
+}
+
 /** Distinct error messages kept per version, so a broken page cannot flood the database. */
 export const MAX_ERRORS_PER_VERSION = 20;
+
+/** The search index keeps this much visible text per artifact. */
+const MAX_INDEXED_CHARS = 100_000;
+
+/** The trigram index cannot match shorter terms. */
+export const MIN_TERM_LENGTH = 3;
+
+/** Search terms the index can match: whitespace-separated, at least MIN_TERM_LENGTH characters. */
+export const searchTerms = (query: string) => query.split(/\s+/).filter((t) => [...t].length >= MIN_TERM_LENGTH);
+
+const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+
+/** Visible text of an HTML page, for the search index: no markup, scripts, styles, comments or <title> (indexed on its own). */
+export function htmlText(html: string): string {
+  return html
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<(script|style|template|title)\b[\s\S]*?<\/\1\s*>/gi, " ")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (entity, name: string) => {
+      const code = name[0] !== "#" ? null : name[1].toLowerCase() === "x" ? parseInt(name.slice(2), 16) : Number(name.slice(1));
+      if (code === null) return ENTITIES[name.toLowerCase()] ?? entity;
+      return code <= 0x10ffff ? String.fromCodePoint(code) : entity;
+    })
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_INDEXED_CHARS);
+}
 
 const COMMENT_COLUMNS = "id, version, author, source, body, created_at, resolved_at, anchor";
 const parseComment = (row: Omit<CommentRow, "anchor"> & { anchor: string | null }): CommentRow => ({
@@ -155,7 +191,47 @@ export class Store {
       "INSERT INTO versions (artifact_id, version, title, agent, size, sha256, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
       id, reserved.version, reserved.title, input.agent ?? null, size, sha256, now,
     );
+    await this.index(id, reserved.title, input.html);
     return { id, version: reserved.version, title: reserved.title, unchanged: false };
+  }
+
+  /** Replaces the artifact's entry in the search index with its latest title and HTML. */
+  private async index(id: string, title: string, html: string): Promise<void> {
+    await this.sql.run("DELETE FROM search_index WHERE id = ?", id);
+    await this.sql.run("INSERT INTO search_index (id, title, body) VALUES (?, ?, ?)", id, title, htmlText(html));
+  }
+
+  /** Indexes artifacts published before the search index existed. Returns how many it indexed. */
+  async indexMissing(): Promise<number> {
+    const missing = await this.sql.all<{ id: string; title: string }>(
+      "SELECT id, title FROM artifacts WHERE version_counter > 0 AND id NOT IN (SELECT id FROM search_index)",
+    );
+    let indexed = 0;
+    for (const { id, title } of missing) {
+      try {
+        await this.index(id, title, (await this.html(id)).html);
+        indexed++;
+      } catch (e) {
+        if (!(e instanceof NotFound)) throw e; // a first version that never finished writing
+      }
+    }
+    return indexed;
+  }
+
+  /** Full-text search over titles and page text, best matches (BM25, title weighted higher) first. */
+  search(query: string, opts: { project?: string; limit?: number } = {}): Promise<SearchHit[]> {
+    const terms = searchTerms(query);
+    if (terms.length === 0) return Promise.resolve([]);
+    // Quoted, every term is a plain substring: FTS5 query syntax in the input cannot break the query.
+    const match = terms.map((t) => `"${t.replaceAll('"', '""')}"`).join(" ");
+    const params: SqlValue[] = opts.project === undefined ? [match] : [match, opts.project];
+    return this.sql.all<SearchHit>(
+      `SELECT a.id, a.title, a.project, a.updated_at, snippet(search_index, -1, '«', '»', '…', 64) AS snippet
+       FROM search_index JOIN artifacts a ON a.id = search_index.id
+       WHERE search_index MATCH ? ${opts.project === undefined ? "" : "AND a.project = ?"}
+       ORDER BY bm25(search_index, 0, 10, 1) LIMIT ?`,
+      ...params, opts.limit ?? 20,
+    );
   }
 
   /** Most recently updated first; all of them unless `limit` is given. */

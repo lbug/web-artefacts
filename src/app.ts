@@ -10,7 +10,7 @@ import { createMcpServer } from "../mcp/tools.ts";
 import { VERSION } from "./version.ts";
 import { CDN_ORIGINS as CDNS, FONT_FILE_ORIGIN, FONT_STYLE_ORIGIN } from "./allowed-origins.ts";
 import { rawOrigin, viewerOrigin, type Config } from "./config.ts";
-import { isValidId, NotFound, type Anchor, type Store } from "./store.ts";
+import { isValidId, MIN_TERM_LENGTH, NotFound, searchTerms, type Anchor, type Store } from "./store.ts";
 
 export const MAX_HTML_BYTES = 10 * 1024 * 1024;
 const MAX_WAIT_SECONDS = 600;
@@ -206,6 +206,15 @@ export function createViewerApp(cfg: Config, store: Store, bus: Bus) {
     const limit = Number(c.req.query("limit"));
     const list = await store.list({ project: c.req.query("project"), limit: Number.isInteger(limit) && limit > 0 ? limit : undefined });
     return c.json(list.map((a) => ({ ...withUrls(a), raw_url: `${rawOrigin(cfg)}/raw/${a.id}/${a.latest_version}` })));
+  });
+
+  // Full-text search over titles and page text; `project` and `limit` as for the list.
+  app.get("/api/search", async (c) => {
+    const q = c.req.query("q") ?? "";
+    if (searchTerms(q).length === 0) throw new HTTPException(400, { message: `Search terms need at least ${MIN_TERM_LENGTH} characters` });
+    const limit = Number(c.req.query("limit"));
+    const hits = await store.search(q, { project: c.req.query("project"), limit: Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : undefined });
+    return c.json(hits.map(withUrls));
   });
 
   const publishInput = (body: Record<string, unknown>) => ({

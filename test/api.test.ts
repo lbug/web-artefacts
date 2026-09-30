@@ -81,6 +81,51 @@ test("artifacts keep the first project they were published from and can be liste
   assert.deepEqual(shop.map((x: { id: string }) => x.id).sort(), [a, c].sort());
 });
 
+test("full-text search finds parts of words in the visible text, not in markup or scripts", async () => {
+  const { call } = setup();
+  const publish = async (json: Record<string, unknown>) => (await (await call("/api/artifacts", { method: "POST", json })).json()).id;
+  const a = await publish({
+    title: "Suche & Projekte",
+    project: "web-artefacts",
+    html: `<!doctype html><title>Tabtitel</title><style>.geheimklasse{}</style><script>const unsichtbar = 1;</script>
+      <!-- kommentarwort --><h1 class="markupwort">Galerie</h1><p>Der Projektfilter zeigt Datenflüsse &amp; mehr.</p>`,
+  });
+  const b = await publish({ title: "Filter-Konzept", project: "shop", html: "<p>Wie wir Listen sortieren</p>" });
+  const search = async (q: string) => (await (await call(`/api/search?q=${encodeURIComponent(q)}`)).json()) as Array<{ id: string; snippet: string; url: string }>;
+
+  // "filter" is inside the compound "Projektfilter"; the title match ranks first.
+  assert.deepEqual((await search("filter")).map((h) => h.id), [b, a]);
+  // Umlauts match without them, and all terms must match.
+  assert.deepEqual((await search("datenfluss galerie")).map((h) => h.id), [a]);
+  const [hit] = await search("projektfilter");
+  assert.match(hit.snippet, /«Projektfilter»/);
+  assert.equal(hit.url, `http://127.0.0.1:4400/a/${a}`);
+  // Entities are decoded; markup, styles, scripts and comments are not indexed.
+  assert.match((await search("datenflüsse"))[0].snippet, /& mehr/);
+  for (const hidden of ["tabtitel", "geheimklasse", "unsichtbar", "kommentarwort", "markupwort"]) assert.deepEqual(await search(hidden), [], hidden);
+  // FTS5 syntax in the query is taken literally.
+  assert.deepEqual(await search('filter" OR "x'), []);
+
+  assert.deepEqual((await (await call("/api/search?q=filter&project=shop")).json()).map((h: { id: string }) => h.id), [b]);
+  assert.equal((await call("/api/search?q=ab")).status, 400);
+
+  // A new version replaces the indexed text and title.
+  await call(`/api/artifacts/${b}/versions`, { method: "POST", json: { html: "<p>Kassenbon</p>", title: "Bon" } });
+  assert.deepEqual((await search("sortieren")), []);
+  assert.deepEqual((await search("kassenbon")).map((h) => h.id), [b]);
+});
+
+test("artifacts published before search existed are indexed on startup", async () => {
+  const { cfg, store, call } = setup();
+  const id = (await (await call("/api/artifacts", { method: "POST", json: { html: "<p>Altbestand</p>", title: "Alt" } })).json()).id;
+  const sql = openSql(cfg.dataDir);
+  await sql.run("DELETE FROM search_index");
+  assert.deepEqual(await store.search("altbestand"), []);
+  assert.equal(await store.indexMissing(), 1);
+  assert.deepEqual((await store.search("altbestand")).map((h) => h.id), [id]);
+  assert.equal(await store.indexMissing(), 0);
+});
+
 test("the list has no limit unless one is asked for", async () => {
   const { call } = setup();
   for (let i = 0; i < 120; i++) await call("/api/artifacts", { method: "POST", json: { html: `<p>${i}</p>`, title: `T${i}` } });
@@ -353,7 +398,7 @@ test("migrations are versioned and idempotent", async () => {
   const { cfg } = setup();
   const { DatabaseSync } = await import("node:sqlite");
   const db = new DatabaseSync(join(cfg.dataDir, "artifacts.db"));
-  assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 3);
+  assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 4);
   db.close();
   openSql(cfg.dataDir); // reopening must not fail or re-run migrations
 });

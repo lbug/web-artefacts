@@ -40,7 +40,7 @@ test("stdio MCP: autostart, publish, revise, comment loop", async (t) => {
 
   assert.equal(client.getNegotiatedProtocolVersion(), "2026-07-28");
   const listed = (await client.listTools()).tools;
-  assert.deepEqual(listed.map((t) => t.name).sort(), ["list_artifacts", "publish_artifact", "read_artifact", "read_comments", "resolve_comments", "wait_for_comments"]);
+  assert.deepEqual(listed.map((t) => t.name).sort(), ["list_artifacts", "publish_artifact", "read_artifact", "read_comments", "resolve_comments", "search_artifacts", "wait_for_comments"]);
   for (const t of listed) assert.equal(t.annotations?.openWorldHint, false, t.name);
   assert.equal(listed.find((t) => t.name === "read_comments")!.annotations?.readOnlyHint, true);
   assert.ok(listed.find((t) => t.name === "publish_artifact")!.outputSchema);
@@ -201,6 +201,21 @@ test("stdio MCP files artifacts under the agent's git repository and lists that 
   assert.match((long.structuredContent as Listed).note ?? "", /Only the 100 most recently updated/);
   assert.match(textOf(long), /Only the 100 most recently updated/);
 
+  // Search finds the old artifact again, limited to the project unless asked otherwise.
+  type Searched = { hits: Array<{ title: string; snippet: string; url: string }>; project?: string; note?: string };
+  const search = async (args: Record<string, unknown>) => (await client.callTool({ name: "search_artifacts", arguments: args })).structuredContent as Searched;
+  const cart = await search({ query: "cart" });
+  assert.equal(cart.project, "shop");
+  assert.deepEqual(cart.hits.map((h) => h.title), ["Cart"]);
+  assert.match(cart.hits[0].snippet, /«Cart»/);
+  assert.deepEqual((await search({ query: "Bulk" })).hits.length, 10);
+  const other = await search({ query: "other" });
+  assert.deepEqual(other.hits, []);
+  assert.match(other.note ?? "", /all_projects: true/);
+  assert.deepEqual((await search({ query: "other", all_projects: true })).hits.map((h) => h.title), ["Other"]);
+  const short = (await client.callTool({ name: "search_artifacts", arguments: { query: "ab" } })) as TextResult;
+  assert.equal(short.isError, true);
+  assert.match(short.content[0].text, /at least 3 characters/);
   await client.close();
 });
 

@@ -19,6 +19,12 @@ export async function startServer(cfg: Config): Promise<void> {
   await listen(createViewerApp(cfg, store, bus).fetch, cfg.viewerPort);
   await listen(createRawApp(cfg, store).fetch, cfg.rawPort);
 
+  // After listening, so agents waiting for the service are not held up by it.
+  store.indexMissing().then(
+    (n) => n > 0 && console.log(`Indexed ${n} artifact(s) for search.`),
+    (e) => console.error("Indexing artifacts for search failed:", e),
+  );
+
   console.log(`web-artefacts
   Viewer: ${viewerOrigin(cfg)}
   Raw:    ${rawOrigin(cfg)}
